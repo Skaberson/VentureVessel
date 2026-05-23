@@ -1,0 +1,12 @@
+{
+  "name": "venture-vessel",
+  "version": "1.0.0",
+  "description": "Voxel game server",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}

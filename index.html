@@ -23,7 +23,7 @@
 
     #overlay {
       position: absolute; top: 0; left: 0; width: 100%; height: 100%;
-      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      display: none; flex-direction: column; align-items: center; justify-content: center;
       background: rgba(0,0,0,0.65);
       color: #fff; font: 22px/1.8 monospace; text-align: center;
       pointer-events: auto; cursor: pointer;
@@ -67,11 +67,7 @@
 <body>
   <div id="ui">
     <div id="crosshair"></div>
-    <div id="overlay">
-      Click to Play
-      <small>WASD — move &nbsp;|&nbsp; Mouse — look &nbsp;|&nbsp; LMB — mine &nbsp;|&nbsp; Space — jump</small>
-      <small>Gamepad: L-stick move &nbsp;|&nbsp; R-stick look &nbsp;|&nbsp; RT mine</small>
-    </div>
+    <div id="overlay"></div>
     <div id="hud"></div>
     <div id="command-feedback"></div>
     <input type="text" id="command-input" />
@@ -85,6 +81,6 @@
     }
   }
   </script>
-  <script type="module" src="scripts/main.js"></script>
+  <script type="module" src="scripts/core/main.js"></script>
 </body>
 </html>

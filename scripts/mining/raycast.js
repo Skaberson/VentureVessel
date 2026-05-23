@@ -1,6 +1,8 @@
 // DDA voxel traversal (Amanatides & Woo).
 // Returns { x, y, z, face } of the first solid voxel hit, or null.
 // `face` is the [nx,ny,nz] normal of the face that was entered.
+// Water voxels are skipped — they are non-solid and cannot be mined.
+const WATER = 22;
 export function raycastVoxel(world, origin, direction, maxDist = 12) {
     const dx = direction.x, dy = direction.y, dz = direction.z;
 
@@ -25,7 +27,8 @@ export function raycastVoxel(world, origin, direction, maxDist = 12) {
     let t = 0;
 
     while (t < maxDist) {
-        if (world.get(x, y, z)) return { x, y, z, face };
+        const t0 = world.get(x, y, z);
+        if (t0 && t0 !== WATER) return { x, y, z, face };
 
         if (tMaxX < tMaxY && tMaxX < tMaxZ) {
             t = tMaxX; x += stepX; tMaxX += tDeltaX;

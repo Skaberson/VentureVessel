@@ -1,10 +1,10 @@
-import { CHUNK, MAX_Y, MOLTENROCK, STONE, DEEPSTONE, LAVAROCK, DIM_MOON, MOONSTONE, WOODPLANKS } from '../world.js';
+import { CHUNK, MAX_Y, MOLTENROCK, STONE, DEEPSTONE, LAVAROCK, DIM_MOON, MOONSTONE, WOODPLANKS, WORKBENCH, WATER, LIGHT_LEVELS } from '../world/world.js';
 import { MC_EDGE_TABLE, MC_TRI_TABLE } from './mc_tables.js';
 
 const GAUSS_OFF = [], GAUSS_W = [];
 let GAUSS_SUM = 0;
 for (let dz=-1;dz<=1;dz++) for (let dy=-1;dy<=1;dy++) for (let dx=-1;dx<=1;dx++) {
-    const w = Math.exp(-(dx*dx+dy*dy+dz*dz)*0.8);
+    const w = Math.exp(-(dx*dx+dy*dy+dz*dz)*0.4);
     GAUSS_OFF.push(dx,dy,dz); GAUSS_W.push(w); GAUSS_SUM += w;
 }
 
@@ -20,10 +20,9 @@ function getGaussIdxOffsets(bsx, bsy) {
 const CX=[0,1,1,0,0,1,1,0], CY=[0,0,0,0,1,1,1,1], CZ=[0,0,1,1,0,0,1,1];
 const EA=[0,1,2,3,4,5,6,7,0,1,2,3], EB=[1,2,3,0,5,6,7,4,4,5,6,7];
 
-const MIN_BRIGHTNESS = 0.2;
-const MAX_LIGHT      = 15;
+const MIN_BRIGHTNESS = 0.0;
 
-export function buildChunkMesh(world, cx, cy, cz, fullbright = false, lod = 1, voxelMode = false) {
+export function buildChunkMesh(world, cx, cy, cz, fullbright = false, lod = 1, voxelMode = false, useGaussian = true) {
     const x0 = cx*CHUNK, y0 = cy*CHUNK, z0 = cz*CHUNK;
     const x1 = x0+CHUNK+1;
     const y1 = Math.min(y0+CHUNK+1, MAX_Y+1);
@@ -66,9 +65,21 @@ export function buildChunkMesh(world, cx, cy, cz, fullbright = false, lod = 1, v
         return typeBuf[(x-bx0)+bsx*((y-by0)+bsy*(z-bz0))];
     }
     function getRawLight(x,y,z) {
-        if (y < by0 || y > by1 || x < bx0 || x > bx1 || z < bz0 || z > bz1) return y >= MAX_Y ? MAX_LIGHT : 0;
-        if (getType(x, y, z) === MOLTENROCK) return MAX_LIGHT;
-        return lightBuf[(x-bx0)+bsx*((y-by0)+bsy*(z-bz0))];
+        if (y < by0 || y > by1 || x < bx0 || x > bx1 || z < bz0 || z > bz1) return y >= MAX_Y ? LIGHT_LEVELS : 0;
+        if (getType(x, y, z) === MOLTENROCK) return LIGHT_LEVELS;
+        const i = (x-bx0)+bsx*((y-by0)+bsy*(z-bz0));
+        const stored = lightBuf[i];
+        if (!solidBuf[i]) return stored;
+        // Solid block: bleed from the brightest adjacent non-solid neighbour so
+        // corners inside tree trunks / rock faces don't produce dark splotches.
+        let best = stored;
+        if (x+1<=bx1){const j=(x+1-bx0)+bsx*((y-by0)+bsy*(z-bz0));  if(!solidBuf[j]&&lightBuf[j]>best)best=lightBuf[j];}
+        if (x-1>=bx0){const j=(x-1-bx0)+bsx*((y-by0)+bsy*(z-bz0));  if(!solidBuf[j]&&lightBuf[j]>best)best=lightBuf[j];}
+        if (y+1<=by1){const j=(x-bx0)+bsx*((y+1-by0)+bsy*(z-bz0));  if(!solidBuf[j]&&lightBuf[j]>best)best=lightBuf[j];}
+        if (y-1>=by0){const j=(x-bx0)+bsx*((y-1-by0)+bsy*(z-bz0));  if(!solidBuf[j]&&lightBuf[j]>best)best=lightBuf[j];}
+        if (z+1<=bz1){const j=(x-bx0)+bsx*((y-by0)+bsy*(z+1-bz0));  if(!solidBuf[j]&&lightBuf[j]>best)best=lightBuf[j];}
+        if (z-1>=bz0){const j=(x-bx0)+bsx*((y-by0)+bsy*(z-1-bz0));  if(!solidBuf[j]&&lightBuf[j]>best)best=lightBuf[j];}
+        return best;
     }
 
     // ── Density cache ─────────────────────────────────────────────────────────
@@ -81,15 +92,15 @@ export function buildChunkMesh(world, cx, cy, cz, fullbright = false, lod = 1, v
     for (let x=x0; x<=x1; x++) {
         const dIdx     = (x-x0)+dsx*((y-y0)+dsy*(z-z0));
         const baseIdx = (x-bx0)+bsx*((y-by0)+bsy*(z-bz0));
-        if (voxelMode) {
+        if (voxelMode || !useGaussian) {
             densCache[dIdx] = solidBuf[baseIdx];
         } else {
-            // Exclude WOODPLANKS from the Gaussian so smooth terrain doesn't try
-            // to blend into plank voxels — planks use box geometry, not MC.
+            // Exclude WOODPLANKS and WATER from the Gaussian so smooth terrain doesn't
+            // blend into them — these types use box geometry, not MC.
             let sum = 0;
             for (let i = 0; i < GAUSS_W.length; i++) {
                 const nIdx = baseIdx + gaussIdxOffsets[i];
-                if (typeBuf[nIdx] !== WOODPLANKS) {
+                if (typeBuf[nIdx] !== WOODPLANKS && typeBuf[nIdx] !== WORKBENCH && typeBuf[nIdx] !== WATER) {
                     sum += GAUSS_W[i] * solidBuf[nIdx];
                 }
             }
@@ -126,7 +137,7 @@ export function buildChunkMesh(world, cx, cy, cz, fullbright = false, lod = 1, v
         // Blend along Z
         const final = v0 * (1 - tz) + v1 * tz;
         
-        const s = final / MAX_LIGHT;
+        const s = final / LIGHT_LEVELS;
         return Math.pow(MIN_BRIGHTNESS + s * (1.0 - MIN_BRIGHTNESS), 0.5);
     }
 
@@ -175,6 +186,19 @@ export function buildChunkMesh(world, cx, cy, cz, fullbright = false, lod = 1, v
                         : (y < -100) ? LAVAROCK : (y < 100 ? DEEPSTONE : STONE);
         }
 
+        // Cell-wide majority material: tally all 8 corners and pick the most frequent
+        // non-zero type. Used as tiebreaker when the 3 triangle edges all differ.
+        const matCount = new Map();
+        for (let k = 0; k < 8; k++) {
+            const m = cornerMat[k];
+            if (m === 0) continue;
+            matCount.set(m, (matCount.get(m) ?? 0) + 1);
+        }
+        let cellMajorMat = fallbackMat, cellMajorCount = 0;
+        for (const [m, c] of matCount) {
+            if (c > cellMajorCount) { cellMajorCount = c; cellMajorMat = m; }
+        }
+
         const em=MC_EDGE_TABLE[ci];
         const verts=new Array(12);
         for(let e=0;e<12;e++){
@@ -197,19 +221,31 @@ export function buildChunkMesh(world, cx, cy, cz, fullbright = false, lod = 1, v
             const e0=tris[i], e1=tris[i+1], e2=tris[i+2];
             const v0=verts[e0], v1=verts[e1], v2=verts[e2];
 
-            // Majority vote across the 3 edge inside-corner materials.
-            const m0=edgeMat[e0], m1=edgeMat[e1], m2=edgeMat[e2];
-            const triMat = (m0 === m1 || m0 === m2) ? m0 : m1;
-            if (triMat === WOODPLANKS) continue; // box mesher handles this type
+            // Triplanar UV mapping: Pick projection plane based on triangle normal
+            const nx = (v1[1]-v0[1])*(v2[2]-v0[2]) - (v1[2]-v0[2])*(v2[1]-v0[1]);
+            const ny = (v1[2]-v0[2])*(v2[0]-v0[0]) - (v1[0]-v0[0])*(v2[2]-v0[2]);
+            const nz = (v1[0]-v0[0])*(v2[1]-v0[1]) - (v1[1]-v0[1])*(v2[0]-v0[0]);
+
+            // March inward along the inverted normal until we hit a solid voxel.
+            // A single 0.6-unit step can still land in air when the Gaussian isosurface
+            // sits away from actual voxel centres, so we try increasing offsets.
+            const nLen = Math.sqrt(nx*nx + ny*ny + nz*nz) || 1;
+            const pcx = (v0[0]+v1[0]+v2[0])/3, pcy = (v0[1]+v1[1]+v2[1])/3, pcz = (v0[2]+v1[2]+v2[2])/3;
+            let triMat = 0;
+            for (let step = 0.6; step <= 2.4 && triMat === 0; step += 0.6) {
+                triMat = getType(Math.round(pcx - nx/nLen*step), Math.round(pcy - ny/nLen*step), Math.round(pcz - nz/nLen*step));
+            }
+            // If still no hit, fall back to edge majority then cell majority.
+            if (triMat === 0) {
+                const m0=edgeMat[e0], m1=edgeMat[e1], m2=edgeMat[e2];
+                triMat = m0===m1 ? m0 : m0===m2 ? m0 : m1===m2 ? m1 : cellMajorMat;
+            }
+            if (triMat === WOODPLANKS || triMat === WORKBENCH || triMat === WATER) continue;
             if (!buckets.has(triMat)) buckets.set(triMat, { pos: [], uvs: [], col: [] });
             const bkt = buckets.get(triMat);
 
             bkt.pos.push(...v0, ...v1, ...v2);
 
-            // Triplanar UV mapping: Pick projection plane based on triangle normal
-            const nx = (v1[1]-v0[1])*(v2[2]-v0[2]) - (v1[2]-v0[2])*(v2[1]-v0[1]);
-            const ny = (v1[2]-v0[2])*(v2[0]-v0[0]) - (v1[0]-v0[0])*(v2[2]-v0[2]);
-            const nz = (v1[0]-v0[0])*(v2[1]-v0[1]) - (v1[1]-v0[1])*(v2[0]-v0[0]);
             const ax = Math.abs(nx), ay = Math.abs(ny), az = Math.abs(nz);
 
             if (ay >= ax && ay >= az) {
@@ -230,7 +266,7 @@ export function buildChunkMesh(world, cx, cy, cz, fullbright = false, lod = 1, v
         }
     }
 
-    // ── Box voxel pass (WOODPLANKS and any future hard-voxel types) ──────────────
+    // ── Box voxel pass (WOODPLANKS, WORKBENCH and any future hard-voxel types) ─────
     // Emits explicit quads with face-culling instead of marching cubes,
     // producing perfectly flat cube faces. Winding verified per-face (CCW outward).
     const BOX_FACES = [
@@ -245,12 +281,17 @@ export function buildChunkMesh(world, cx, cy, cz, fullbright = false, lod = 1, v
     for (let vz = z0; vz < z0 + CHUNK; vz++)
     for (let vy = y0; vy < y0 + CHUNK; vy++)
     for (let vx = x0; vx < x0 + CHUNK; vx++) {
-        if (getType(vx, vy, vz) !== WOODPLANKS) continue;
-        if (!buckets.has(WOODPLANKS)) buckets.set(WOODPLANKS, { pos: [], uvs: [], col: [] });
-        const bkt = buckets.get(WOODPLANKS);
+        const bvType = getType(vx, vy, vz);
+        const isWaterVoxel = bvType === WATER;
+        if (bvType !== WOODPLANKS && !isWaterVoxel) continue;
+        if (!buckets.has(bvType)) buckets.set(bvType, { pos: [], uvs: [], col: [] });
+        const bkt = buckets.get(bvType);
 
         for (const { n, q, uv } of BOX_FACES) {
-            if (solid(vx + n[0], vy + n[1], vz + n[2])) continue;
+            const nx = vx + n[0], ny = vy + n[1], nz = vz + n[2];
+            // Water: only hide faces adjacent to other water (terrain faces still render through)
+            // Other box types: cull against any solid neighbor
+            if (isWaterVoxel ? getType(nx, ny, nz) === WATER : solid(nx, ny, nz)) continue;
 
             const v0 = [vx+q[0][0], vy+q[0][1], vz+q[0][2]];
             const v1 = [vx+q[1][0], vy+q[1][1], vz+q[1][2]];
