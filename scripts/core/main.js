@@ -19,6 +19,7 @@ import { initSlimes, slimes, CREATURE_BY_NAME, updateSlimes, tryPunchSlime, spaw
 import { initGravestones, gravestones, placeGravestone, updateGraveMining } from '../entities/gravestones.js';
 import { initHealth, getIsDead, getPlayerHealth, damagePlayer, updateHealth, updateVignette, updateDeathSequence, triggerDamageVignette } from '../gameplay/health.js';
 import { NetworkManager } from './network.js';
+import { WS_URL, HTTP_URL } from '../config.js';
 
 const net           = new NetworkManager();
 const remotePlayers = new Map(); // id -> { mesh, labelEl, pos, targetPos, yaw }
@@ -4242,6 +4243,12 @@ net.onHostLeft = () => {
     showFeedback('Host disconnected');
     for (const id of [...remotePlayers.keys()]) removeRemotePlayer(id);
     isLanOpen = false;
+    net.disconnect();
+};
+
+net.onError = (msg) => {
+    showFeedback(msg || 'Server error');
+    net.disconnect();
 };
 
 // ── Shared input style ────────────────────────────────────────────────────────
@@ -4257,26 +4264,48 @@ function _mpInput(placeholder, maxLen = 40) {
 }
 
 // ── Open to LAN modal ─────────────────────────────────────────────────────────
-const lanOverlay    = _modalOverlay(5200);
-const lanBox        = _modalBox();
+const lanOverlay = _modalOverlay(5200);
+const lanBox     = _modalBox();
 lanBox.style.minWidth = '320px';
 lanOverlay.appendChild(lanBox);
 lanBox.appendChild(_modalTitle('Open to LAN'));
 
+// Form state
+const lanFormDiv    = document.createElement('div');
+lanFormDiv.style.cssText = 'display:contents;';
 const lanUserInput  = _mpInput('Your username...', 20);
 const lanWorldInput = _mpInput('World name...', 40);
-
-const lanHint = document.createElement('div');
-lanHint.style.cssText = 'font-size:11px;color:#777;line-height:1.5;';
-lanHint.textContent = 'Others on your LAN can join by opening http://YOUR-IP:3000 in their browser.';
-
+const lanHint       = document.createElement('div');
+lanHint.style.cssText  = 'font-size:11px;color:#777;line-height:1.5;';
+lanHint.textContent    = 'Friends can join from anywhere using the room code.';
 const lanConfirmBtn = _btn('Open to LAN', 'border:1px solid rgba(100,180,255,0.4);background:rgba(100,180,255,0.1);color:#aaccff;');
-const lanCancelBtn  = _btn('Cancel', 'border:1px solid rgba(255,255,255,0.1);background:rgba(255,255,255,0.04);color:#bbb;');
+const lanCancelBtn  = _btn('Cancel',      'border:1px solid rgba(255,255,255,0.1);background:rgba(255,255,255,0.04);color:#bbb;');
+lanFormDiv.appendChild(lanUserInput);
+lanFormDiv.appendChild(lanWorldInput);
+lanFormDiv.appendChild(lanHint);
+lanFormDiv.appendChild(_btnRow(lanCancelBtn, lanConfirmBtn));
+lanBox.appendChild(lanFormDiv);
 
-lanBox.appendChild(lanUserInput);
-lanBox.appendChild(lanWorldInput);
-lanBox.appendChild(lanHint);
-lanBox.appendChild(_btnRow(lanCancelBtn, lanConfirmBtn));
+// Success state (hidden until room is opened)
+const lanSuccessDiv = document.createElement('div');
+lanSuccessDiv.style.cssText = 'display:none;flex-direction:column;align-items:center;gap:12px;';
+const lanCodeEl     = document.createElement('div');
+lanCodeEl.style.cssText = 'font-family:monospace;font-size:36px;font-weight:bold;color:#adf;letter-spacing:8px;text-align:center;padding:8px 0;';
+const lanShareHint  = document.createElement('div');
+lanShareHint.style.cssText = 'font-size:12px;color:#888;text-align:center;';
+lanShareHint.textContent   = 'Share this code with friends to join.';
+const lanCopyBtn = _btn('Copy Code', 'border:1px solid rgba(100,180,255,0.4);background:rgba(100,180,255,0.1);color:#aaccff;');
+lanCopyBtn.addEventListener('click', () => {
+    navigator.clipboard.writeText(lanCodeEl.textContent);
+    lanCopyBtn.textContent = 'Copied!';
+    setTimeout(() => { lanCopyBtn.textContent = 'Copy Code'; }, 1500);
+});
+const lanDoneBtn = _btn('Done', 'border:1px solid rgba(255,255,255,0.1);background:rgba(255,255,255,0.04);color:#bbb;');
+lanDoneBtn.addEventListener('click', () => { lanOverlay.style.display = 'none'; closeSettings(); });
+lanSuccessDiv.appendChild(lanCodeEl);
+lanSuccessDiv.appendChild(lanShareHint);
+lanSuccessDiv.appendChild(_btnRow(lanCopyBtn, lanDoneBtn));
+lanBox.appendChild(lanSuccessDiv);
 
 lanCancelBtn.addEventListener('click',  () => { lanOverlay.style.display = 'none'; });
 lanUserInput.addEventListener( 'keydown', e => { if (e.key === 'Enter') lanConfirmBtn.click(); if (e.key === 'Escape') lanCancelBtn.click(); e.stopPropagation(); });
@@ -4287,14 +4316,16 @@ lanConfirmBtn.addEventListener('click', async () => {
     const worldName = lanWorldInput.value.trim() || currentWorldName || 'World';
     if (!username) { lanUserInput.focus(); return; }
 
-    lanOverlay.style.display = 'none';
+    lanConfirmBtn.textContent = 'Opening…';
+    lanConfirmBtn.disabled    = true;
 
-    const host  = window.location.hostname || 'localhost';
-    const wsUrl = `ws://${host}:3000`;
+    net.disconnect();
     try {
-        await net.connect(wsUrl, username);
+        await net.connect(WS_URL);
     } catch {
-        showFeedback('Server unreachable — run: node server.js');
+        showFeedback('Cannot reach server — is it deployed?');
+        lanConfirmBtn.textContent = 'Open to LAN';
+        lanConfirmBtn.disabled    = false;
         return;
     }
 
@@ -4302,152 +4333,154 @@ lanConfirmBtn.addEventListener('click', async () => {
         const [x, y, z] = key.split(',').map(Number);
         return { x, y, z, v };
     });
-    net.openToLan(worldName, username,
+    const roomCode = await net.hostWorld(username, worldName,
         { bSeedX, bSeedZ, bOffset, mSeedX, mSeedZ },
         deltas, gameTime,
         { x: player.pos.x, y: player.pos.y, z: player.pos.z }
     );
+
     localUsername    = username;
     isLanOpen        = true;
     currentWorldName = worldName;
-    showFeedback(`Opened "${worldName}" to LAN`);
-    closeSettings();
+    lanConfirmBtn.textContent      = 'Open to LAN';
+    lanConfirmBtn.disabled         = false;
+    lanFormDiv.style.display       = 'none';
+    lanSuccessDiv.style.display    = 'flex';
+    lanCodeEl.textContent          = roomCode;
 });
 
-// Insert "Open to LAN" button into settings panel (before Save World)
+// "Open to LAN" button in settings panel (before Save World)
 const openLanBtn = document.createElement('button');
 openLanBtn.textContent = 'Open to LAN';
 openLanBtn.style.cssText = 'font-family:monospace;font-size:13px;padding:9px;border-radius:8px;border:1px solid rgba(100,180,255,0.28);cursor:pointer;background:rgba(100,180,255,0.07);color:#aaccff;margin-top:4px;';
 openLanBtn.addEventListener('click', () => {
-    lanWorldInput.value = currentWorldName ?? '';
-    lanOverlay.style.display = 'flex';
+    lanFormDiv.style.display    = 'contents';
+    lanSuccessDiv.style.display = 'none';
+    lanWorldInput.value         = currentWorldName ?? '';
+    lanOverlay.style.display    = 'flex';
     setTimeout(() => lanUserInput.focus(), 40);
 });
 settingsPanel.insertBefore(openLanBtn, saveWorldBtn);
 
 // ── Join Multiplayer modal ────────────────────────────────────────────────────
-const joinOverlay    = _modalOverlay(5100);
-const joinBox        = _modalBox();
+const joinOverlay = _modalOverlay(5100);
+const joinBox     = _modalBox();
 joinBox.style.minWidth = '380px';
 joinOverlay.appendChild(joinBox);
 joinBox.appendChild(_modalTitle('Join Multiplayer'));
 
 const joinUserInput = _mpInput('Username...', 20);
-const joinIpInput   = _mpInput('Server address  (e.g. 192.168.1.5)');
-joinIpInput.addEventListener('keydown', e => { e.stopPropagation(); if (e.key === 'Enter') joinConnectBtn.click(); if (e.key === 'Escape') joinCancelBtn.click(); });
 
-// Server list
-const joinServerList = document.createElement('div');
-joinServerList.style.cssText = 'display:flex;flex-direction:column;gap:6px;max-height:130px;overflow-y:auto;';
+const joinRoomHeader = document.createElement('div');
+joinRoomHeader.style.cssText = 'display:flex;justify-content:space-between;align-items:center;';
+const joinRoomLabel  = document.createElement('div');
+joinRoomLabel.style.cssText = 'font-size:11px;color:#777;';
+joinRoomLabel.textContent   = 'Open Worlds';
+const joinRefreshBtn = _btn('↻', 'border:1px solid rgba(255,255,255,0.15);background:rgba(255,255,255,0.04);color:#aaa;padding:4px 10px;font-size:14px;');
+joinRoomHeader.appendChild(joinRoomLabel);
+joinRoomHeader.appendChild(joinRefreshBtn);
 
-// Scan button
-const joinScanBtn = _btn('Scan LAN', 'border:1px solid rgba(255,255,255,0.2);background:rgba(255,255,255,0.06);color:#ccc;white-space:nowrap;flex-shrink:0;');
-joinScanBtn.addEventListener('click', async () => {
-    joinScanBtn.textContent = 'Scanning…';
-    joinScanBtn.disabled = true;
-    joinServerList.innerHTML = '';
+const joinRoomList = document.createElement('div');
+joinRoomList.style.cssText = 'display:flex;flex-direction:column;gap:6px;max-height:150px;overflow-y:auto;';
 
-    const subnets = [];
-    const h = window.location.hostname;
-    if (h && h !== 'localhost' && h !== '127.0.0.1') {
-        const parts = h.split('.');
-        if (parts.length === 4) subnets.push(parts.slice(0, 3).join('.'));
-    }
-    if (!subnets.includes('192.168.1')) subnets.push('192.168.1');
-    if (!subnets.includes('192.168.0')) subnets.push('192.168.0');
+const joinCodeInput = _mpInput('Or enter room code...', 8);
+joinCodeInput.style.textTransform = 'uppercase';
 
-    const seen = new Set();
-    const probes = [];
-    for (const sub of subnets) {
-        for (let i = 1; i <= 30; i++) {
-            const ip = `${sub}.${i}`;
-            if (seen.has(ip)) continue;
-            seen.add(ip);
-            probes.push(
-                fetch(`http://${ip}:3000/api/server-info`, { signal: AbortSignal.timeout(600) })
-                    .then(r => r.ok ? r.json() : null)
-                    .then(data => {
-                        if (!data?.available) return;
-                        const entry = document.createElement('div');
-                        entry.style.cssText = 'border:1px solid rgba(255,255,255,0.12);border-radius:7px;padding:8px 12px;cursor:pointer;display:flex;justify-content:space-between;align-items:center;transition:background 0.12s;';
-                        entry.onmouseenter = () => { entry.style.background = 'rgba(255,255,255,0.07)'; };
-                        entry.onmouseleave = () => { entry.style.background = ''; };
-                        const nameEl = document.createElement('span');
-                        nameEl.style.cssText = 'font-size:13px;font-weight:bold;';
-                        nameEl.textContent = data.worldName;
-                        const ipEl = document.createElement('span');
-                        ipEl.style.cssText = 'font-size:11px;color:#777;font-family:monospace;';
-                        ipEl.textContent = ip;
-                        entry.appendChild(nameEl);
-                        entry.appendChild(ipEl);
-                        entry.addEventListener('click', () => {
-                            joinIpInput.value = ip;
-                            for (const el of joinServerList.children) {
-                                el.style.borderColor = 'rgba(255,255,255,0.12)';
-                                el.style.background  = '';
-                            }
-                            entry.style.borderColor = 'rgba(100,180,255,0.45)';
-                            entry.style.background  = 'rgba(100,180,255,0.1)';
-                        });
-                        joinServerList.appendChild(entry);
-                    })
-                    .catch(() => {})
-            );
+let _selectedRoomId = null;
+
+async function _loadRooms() {
+    joinRoomList.innerHTML = '';
+    _selectedRoomId = null;
+    const loading = document.createElement('div');
+    loading.style.cssText = 'color:#666;font-size:11px;padding:4px 2px;';
+    loading.textContent   = 'Loading…';
+    joinRoomList.appendChild(loading);
+    try {
+        const r     = await fetch(HTTP_URL + '/api/rooms', { signal: AbortSignal.timeout(4000) });
+        const list  = await r.json();
+        joinRoomList.innerHTML = '';
+        if (!list.length) {
+            const el = document.createElement('div');
+            el.style.cssText = 'color:#666;font-size:11px;padding:4px 2px;';
+            el.textContent   = 'No open worlds yet.';
+            joinRoomList.appendChild(el);
+            return;
         }
+        for (const room of list) {
+            const entry = document.createElement('div');
+            entry.style.cssText = 'border:1px solid rgba(255,255,255,0.12);border-radius:7px;padding:8px 12px;cursor:pointer;display:flex;justify-content:space-between;align-items:center;transition:background 0.12s;';
+            entry.addEventListener('mouseenter', () => { if (_selectedRoomId !== room.id) entry.style.background = 'rgba(255,255,255,0.07)'; });
+            entry.addEventListener('mouseleave', () => { if (_selectedRoomId !== room.id) entry.style.background = ''; });
+            const nameEl = document.createElement('span');
+            nameEl.style.cssText = 'font-size:13px;font-weight:bold;';
+            nameEl.textContent   = room.worldName;
+            const metaEl = document.createElement('span');
+            metaEl.style.cssText = 'font-size:11px;color:#777;font-family:monospace;';
+            metaEl.textContent   = `${room.playerCount} online · ${room.id}`;
+            entry.appendChild(nameEl);
+            entry.appendChild(metaEl);
+            entry.addEventListener('click', () => {
+                for (const el of joinRoomList.children) { el.style.borderColor = 'rgba(255,255,255,0.12)'; el.style.background = ''; }
+                entry.style.borderColor = 'rgba(100,180,255,0.45)';
+                entry.style.background  = 'rgba(100,180,255,0.1)';
+                _selectedRoomId     = room.id;
+                joinCodeInput.value = '';
+            });
+            joinRoomList.appendChild(entry);
+        }
+    } catch {
+        joinRoomList.innerHTML = '';
+        const el = document.createElement('div');
+        el.style.cssText = 'color:#c66;font-size:11px;padding:4px 2px;';
+        el.textContent   = 'Could not reach server.';
+        joinRoomList.appendChild(el);
     }
+}
 
-    await Promise.allSettled(probes);
-    joinScanBtn.textContent = 'Scan LAN';
-    joinScanBtn.disabled = false;
-    if (!joinServerList.children.length) {
-        const empty = document.createElement('div');
-        empty.style.cssText = 'color:#666;font-size:11px;padding:4px 2px;';
-        empty.textContent = 'No servers found.';
-        joinServerList.appendChild(empty);
+joinRefreshBtn.addEventListener('click', _loadRooms);
+joinCodeInput.addEventListener('input', () => {
+    joinCodeInput.value = joinCodeInput.value.toUpperCase();
+    if (joinCodeInput.value) {
+        _selectedRoomId = null;
+        for (const el of joinRoomList.children) { el.style.borderColor = 'rgba(255,255,255,0.12)'; el.style.background = ''; }
     }
 });
 
-// Connect / Cancel buttons (declared before keydown listener above references joinConnectBtn)
 const joinConnectBtn = _btn('Connect', 'border:1px solid rgba(100,180,255,0.4);background:rgba(100,180,255,0.1);color:#aaccff;');
 const joinCancelBtn  = _btn('Cancel',  'border:1px solid rgba(255,255,255,0.1);background:rgba(255,255,255,0.04);color:#bbb;');
 
-// IP row: input + scan button side by side
-const _joinIpRow = document.createElement('div');
-_joinIpRow.style.cssText = 'display:flex;gap:8px;align-items:stretch;';
-const _joinIpWrap = document.createElement('div');
-_joinIpWrap.style.cssText = 'flex:1;min-width:0;';
-_joinIpWrap.appendChild(joinIpInput);
-_joinIpRow.appendChild(_joinIpWrap);
-_joinIpRow.appendChild(joinScanBtn);
-
 joinBox.appendChild(joinUserInput);
-joinBox.appendChild(_joinIpRow);
-joinBox.appendChild(joinServerList);
+joinBox.appendChild(joinRoomHeader);
+joinBox.appendChild(joinRoomList);
+joinBox.appendChild(joinCodeInput);
 joinBox.appendChild(_btnRow(joinCancelBtn, joinConnectBtn));
 
 joinCancelBtn.addEventListener('click',  () => { joinOverlay.style.display = 'none'; });
 joinUserInput.addEventListener('keydown', e => { e.stopPropagation(); if (e.key === 'Enter') joinConnectBtn.click(); if (e.key === 'Escape') joinCancelBtn.click(); });
+joinCodeInput.addEventListener('keydown', e => { e.stopPropagation(); if (e.key === 'Enter') joinConnectBtn.click(); if (e.key === 'Escape') joinCancelBtn.click(); });
 
 joinConnectBtn.addEventListener('click', async () => {
     const username = joinUserInput.value.trim();
-    const ip       = joinIpInput.value.trim();
+    const roomCode = joinCodeInput.value.trim() || _selectedRoomId;
     if (!username) { joinUserInput.focus(); return; }
-    if (!ip)       { joinIpInput.focus();   return; }
+    if (!roomCode) { showFeedback('Select a world or enter a room code'); return; }
 
     joinConnectBtn.textContent = 'Connecting…';
     joinConnectBtn.disabled    = true;
 
+    net.disconnect();
     try {
-        await net.connect(`ws://${ip}:3000`, username);
+        await net.connect(WS_URL);
     } catch {
-        showFeedback('Could not connect to server');
+        showFeedback('Cannot reach server');
         joinConnectBtn.textContent = 'Connect';
         joinConnectBtn.disabled    = false;
         return;
     }
 
-    localUsername = username;
-    joinOverlay.style.display = 'none';
+    net.joinRoom(roomCode, username);
+    localUsername              = username;
+    joinOverlay.style.display  = 'none';
     joinConnectBtn.textContent = 'Connect';
     joinConnectBtn.disabled    = false;
     // world_state arrives via net.onWorldState → game starts automatically
@@ -4456,28 +4489,12 @@ joinConnectBtn.addEventListener('click', async () => {
 // "Join Multiplayer" button on main menu
 const mmJoinBtn = _menuBtn('Join Multiplayer');
 mainMenuEl.appendChild(mmJoinBtn);
-
 mmJoinBtn.addEventListener('click', () => {
-    joinServerList.innerHTML = '';
-    // Pre-fill IP if we loaded the game directly from the server
-    if (window.location.hostname && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
-        joinIpInput.value = window.location.hostname;
-    } else {
-        joinIpInput.value = '';
-    }
+    _selectedRoomId           = null;
+    joinCodeInput.value       = '';
     joinOverlay.style.display = 'flex';
     setTimeout(() => joinUserInput.focus(), 40);
+    _loadRooms();
 });
-
-// Auto-update Join button label if a world is already open on the server
-(async () => {
-    if (!window.location.hostname || window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') return;
-    try {
-        const r = await fetch('/api/server-info', { signal: AbortSignal.timeout(800) });
-        if (!r.ok) return;
-        const info = await r.json();
-        if (info?.available) mmJoinBtn.textContent = `Join "${info.worldName}"`;
-    } catch {}
-})();
 
 animate();

@@ -3,7 +3,7 @@ const fs   = require('fs');
 const path = require('path');
 const { WebSocketServer } = require('ws');
 
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
 
 const MIME = {
     '.html': 'text/html',
@@ -16,25 +16,32 @@ const MIME = {
     '.json': 'application/json',
 };
 
-// World state set when the host opens to LAN
-let serverState = null; // { worldName, seeds, deltaMap, gameTime }
-
-const clients = new Map(); // id -> { ws, id, username, isHost, pos, yaw, pitch }
+const rooms   = new Map(); // roomId -> { worldName, seeds, deltaMap, gameTime, hostId }
+const clients = new Map(); // id -> { ws, id, username, roomId, isHost, pos, yaw }
 let nextId = 1;
+
+function makeRoomId() {
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    let id = '';
+    for (let i = 0; i < 6; i++) id += chars[Math.floor(Math.random() * chars.length)];
+    return rooms.has(id) ? makeRoomId() : id;
+}
 
 // ── HTTP server ───────────────────────────────────────────────────────────────
 const httpServer = http.createServer((req, res) => {
     const urlPath = req.url.split('?')[0];
 
     res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET');
 
-    if (urlPath === '/api/server-info') {
+    if (urlPath === '/api/rooms') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify(
-            serverState
-                ? { available: true, worldName: serverState.worldName }
-                : { available: false }
-        ));
+        const list = [...rooms.entries()].map(([id, r]) => ({
+            id,
+            worldName:   r.worldName,
+            playerCount: [...clients.values()].filter(c => c.roomId === id).length,
+        }));
+        res.end(JSON.stringify(list));
         return;
     }
 
@@ -42,7 +49,6 @@ const httpServer = http.createServer((req, res) => {
         path.join(__dirname, urlPath === '/' ? 'index.html' : urlPath)
     );
 
-    // Prevent directory traversal
     if (!filePath.startsWith(__dirname + path.sep) && filePath !== path.join(__dirname, 'index.html')) {
         res.writeHead(403); res.end('Forbidden'); return;
     }
@@ -62,28 +68,18 @@ function send(ws, msg) {
     if (ws.readyState === 1) ws.send(JSON.stringify(msg));
 }
 
-function broadcast(msg, excludeWs = null) {
+function broadcastToRoom(roomId, msg, excludeId = null) {
     const str = JSON.stringify(msg);
     for (const c of clients.values()) {
-        if (c.ws !== excludeWs && c.ws.readyState === 1) c.ws.send(str);
+        if (c.roomId === roomId && c.id !== excludeId && c.ws.readyState === 1)
+            c.ws.send(str);
     }
 }
 
-function playerList(excludeId) {
+function playersInRoom(roomId, excludeId) {
     return [...clients.values()]
-        .filter(c => c.id !== excludeId)
+        .filter(c => c.roomId === roomId && c.id !== excludeId)
         .map(c => ({ id: c.id, username: c.username, pos: c.pos, yaw: c.yaw }));
-}
-
-function worldStateMsg(forId) {
-    return {
-        type: 'world_state',
-        worldName: serverState.worldName,
-        seeds:     serverState.seeds,
-        deltas:    [...serverState.deltaMap.values()],
-        gameTime:  serverState.gameTime,
-        players:   playerList(forId),
-    };
 }
 
 wss.on('connection', ws => {
@@ -96,43 +92,51 @@ wss.on('connection', ws => {
         switch (msg.type) {
 
             case 'host_open': {
-                const dm = new Map();
+                const rid = makeRoomId();
+                const dm  = new Map();
                 for (const d of (msg.deltas ?? [])) dm.set(`${d.x},${d.y},${d.z}`, d);
-                serverState = { worldName: msg.worldName, seeds: msg.seeds, deltaMap: dm, gameTime: msg.gameTime };
-
-                clients.set(id, { ws, id, username: msg.username, isHost: true, pos: msg.pos, yaw: 0 });
-
-                // Send world state to any clients already waiting
-                for (const c of clients.values()) {
-                    if (c.id !== id) send(c.ws, worldStateMsg(c.id));
-                }
-
-                console.log(`[LAN] "${msg.worldName}" opened by ${msg.username}`);
+                rooms.set(rid, { worldName: msg.worldName, seeds: msg.seeds, deltaMap: dm, gameTime: msg.gameTime, hostId: id });
+                clients.set(id, { ws, id, username: msg.username, roomId: rid, isHost: true, pos: msg.pos, yaw: 0 });
+                send(ws, { type: 'room_created', roomId: rid });
+                console.log(`[Room ${rid}] "${msg.worldName}" opened by ${msg.username}`);
                 break;
             }
 
-            case 'join': {
-                clients.set(id, { ws, id, username: msg.username, isHost: false, pos: null, yaw: 0 });
-                // Tell others a new player joined
-                broadcast({ type: 'player_join', id, username: msg.username }, ws);
-                // If world is already open, send state immediately
-                if (serverState) send(ws, worldStateMsg(id));
+            case 'join_room': {
+                const room = rooms.get(msg.roomId);
+                if (!room) { send(ws, { type: 'error', message: 'Room not found' }); break; }
+                clients.set(id, { ws, id, username: msg.username, roomId: msg.roomId, isHost: false, pos: null, yaw: 0 });
+                broadcastToRoom(msg.roomId, { type: 'player_join', id, username: msg.username }, id);
+                send(ws, {
+                    type:      'world_state',
+                    worldName: room.worldName,
+                    seeds:     room.seeds,
+                    deltas:    [...room.deltaMap.values()],
+                    gameTime:  room.gameTime,
+                    players:   playersInRoom(msg.roomId, id),
+                });
+                console.log(`[Room ${msg.roomId}] ${msg.username} joined`);
                 break;
             }
 
             case 'position': {
                 const c = clients.get(id);
-                if (c) { c.pos = msg.pos; c.yaw = msg.yaw; }
-                broadcast({ type: 'player_move', id, pos: msg.pos, yaw: msg.yaw }, ws);
+                if (!c?.roomId) break;
+                c.pos = msg.pos; c.yaw = msg.yaw;
+                broadcastToRoom(c.roomId, { type: 'player_move', id, pos: msg.pos, yaw: msg.yaw }, id);
                 break;
             }
 
             case 'block_change': {
-                if (serverState) {
-                    serverState.deltaMap.set(`${msg.x},${msg.y},${msg.z}`, { x: msg.x, y: msg.y, z: msg.z, v: msg.v });
-                    if (msg.v === 0) serverState.deltaMap.delete(`${msg.x},${msg.y},${msg.z}`);
+                const c = clients.get(id);
+                if (!c?.roomId) break;
+                const room = rooms.get(c.roomId);
+                if (room) {
+                    const key = `${msg.x},${msg.y},${msg.z}`;
+                    if (msg.v === 0) room.deltaMap.delete(key);
+                    else room.deltaMap.set(key, { x: msg.x, y: msg.y, z: msg.z, v: msg.v });
                 }
-                broadcast({ type: 'block_change', x: msg.x, y: msg.y, z: msg.z, v: msg.v }, ws);
+                broadcastToRoom(c.roomId, { type: 'block_change', x: msg.x, y: msg.y, z: msg.z, v: msg.v }, id);
                 break;
             }
         }
@@ -141,12 +145,13 @@ wss.on('connection', ws => {
     ws.on('close', () => {
         const c = clients.get(id);
         clients.delete(id);
-        if (!c) return;
-        broadcast({ type: 'player_leave', id });
+        if (!c?.roomId) return;
         if (c.isHost) {
-            serverState = null;
-            broadcast({ type: 'host_left' });
-            console.log('[LAN] Host disconnected — world closed');
+            rooms.delete(c.roomId);
+            broadcastToRoom(c.roomId, { type: 'host_left' });
+            console.log(`[Room ${c.roomId}] Host left — room closed`);
+        } else {
+            broadcastToRoom(c.roomId, { type: 'player_leave', id });
         }
     });
 });
@@ -163,8 +168,8 @@ httpServer.listen(PORT, () => {
         if (lanIP) break;
     }
 
-    console.log('\nVenture Vessel LAN server');
+    console.log('\nVenture Vessel server');
     console.log(`  Local:  http://localhost:${PORT}`);
     if (lanIP) console.log(`  LAN:    http://${lanIP}:${PORT}`);
-    console.log('\nLoad the game in a browser, then press ` and choose "Open to LAN".\n');
+    console.log('\nDeploy to Railway for public access: https://railway.app\n');
 });

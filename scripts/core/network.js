@@ -10,18 +10,19 @@ export class NetworkManager {
         this.onPlayerLeave = null; // (id) => void
         this.onPlayerMove  = null; // (id, pos, yaw) => void
         this.onHostLeft    = null; // () => void
+        this.onError       = null; // (message) => void
 
-        this._posTimer = 0;
+        this._posTimer    = 0;
+        this._roomResolve = null;
     }
 
-    connect(url, username) {
+    connect(url) {
         return new Promise((resolve, reject) => {
             const ws = new WebSocket(url);
             this.ws  = ws;
 
             ws.addEventListener('open', () => {
                 this.connected = true;
-                ws.send(JSON.stringify({ type: 'join', username }));
                 resolve();
             });
 
@@ -39,10 +40,18 @@ export class NetworkManager {
         });
     }
 
-    openToLan(worldName, username, seeds, deltas, gameTime, pos) {
+    // Sends host_open, resolves with the room code once server confirms.
+    hostWorld(username, worldName, seeds, deltas, gameTime, pos) {
+        return new Promise(resolve => {
+            this._roomResolve = resolve;
+            this.isHost = true;
+            this.ws.send(JSON.stringify({ type: 'host_open', username, worldName, seeds, deltas, gameTime, pos }));
+        });
+    }
+
+    joinRoom(roomId, username) {
         if (!this.connected) return;
-        this.isHost = true;
-        this.ws.send(JSON.stringify({ type: 'host_open', worldName, username, seeds, deltas, gameTime, pos }));
+        this.ws.send(JSON.stringify({ type: 'join_room', roomId, username }));
     }
 
     sendBlockChange(x, y, z, v) {
@@ -66,12 +75,14 @@ export class NetworkManager {
 
     _handle(msg) {
         switch (msg.type) {
+            case 'room_created': if (this._roomResolve) { this._roomResolve(msg.roomId); this._roomResolve = null; } break;
             case 'world_state':  if (this.onWorldState)  this.onWorldState(msg);                         break;
             case 'block_change': if (this.onBlockChange) this.onBlockChange(msg.x, msg.y, msg.z, msg.v); break;
             case 'player_join':  if (this.onPlayerJoin)  this.onPlayerJoin(msg.id, msg.username);         break;
             case 'player_leave': if (this.onPlayerLeave) this.onPlayerLeave(msg.id);                      break;
             case 'player_move':  if (this.onPlayerMove)  this.onPlayerMove(msg.id, msg.pos, msg.yaw);     break;
             case 'host_left':    if (this.onHostLeft)    this.onHostLeft();                                break;
+            case 'error':        if (this.onError)       this.onError(msg.message);                       break;
         }
     }
 }
