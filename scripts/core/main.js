@@ -4446,7 +4446,7 @@ const _rpScreen = new THREE.Vector3();
 
 // ── Player model ──────────────────────────────────────────────────────────────
 
-new GLTFLoader().load('/assets/models/player1.glb', gltf => {
+new GLTFLoader().load('assets/models/player1.glb', gltf => {
     playerModelTemplate = gltf.scene;
     playerModelTemplate.traverse(o => { if (o.isMesh) o.castShadow = true; });
     localModel = _makePlayerModel();
