@@ -13,7 +13,7 @@ let vignetteFadeRate  = 0;
 
 let _player, _getIsFlying, _setIsFlying, _getSlimes, _placeGravestone;
 let _inventory, _mainInventory, _getSelectedSlot, _setSelectedSlot, _updateInventoryUI;
-let _shake;
+let _shake, _onRebirth;
 
 const heartHUD = document.createElement('div');
 heartHUD.style.cssText = 'position:fixed;top:16px;right:16px;display:flex;flex-direction:row-reverse;gap:3px;pointer-events:none;z-index:1000;';
@@ -77,10 +77,11 @@ rebirthBtn.addEventListener('click', () => {
     fallStartY = null;
     updateHeartHUD();
 
-    _player.pos.set(8, 184, 8);
     _player.vel.set(0, 0, 0);
     _player.yaw = 0; _player.pitch = 0;
     _setIsFlying(false);
+
+    _onRebirth?.();
 
     document.body.requestPointerLock?.();
 });
@@ -99,6 +100,7 @@ export function initHealth(ctx) {
     _setSelectedSlot  = ctx.setSelectedSlot;
     _updateInventoryUI = ctx.updateInventoryUI;
     _shake            = ctx.shake;
+    _onRebirth        = ctx.onRebirth;
 
     updateHeartHUD();
 }

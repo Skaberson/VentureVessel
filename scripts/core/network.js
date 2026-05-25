@@ -59,12 +59,12 @@ export class NetworkManager {
         this.ws.send(JSON.stringify({ type: 'block_change', x, y, z, v }));
     }
 
-    tickPositionBroadcast(dt, pos, yaw) {
+    tickPositionBroadcast(dt, pos, yaw, pitch) {
         this._posTimer += dt;
         if (this._posTimer < 0.05) return; // 20 Hz
         this._posTimer = 0;
         if (!this.connected) return;
-        this.ws.send(JSON.stringify({ type: 'position', pos: { x: pos.x, y: pos.y, z: pos.z }, yaw }));
+        this.ws.send(JSON.stringify({ type: 'position', pos: { x: pos.x, y: pos.y, z: pos.z }, yaw, pitch }));
     }
 
     disconnect() {
@@ -80,7 +80,7 @@ export class NetworkManager {
             case 'block_change': if (this.onBlockChange) this.onBlockChange(msg.x, msg.y, msg.z, msg.v); break;
             case 'player_join':  if (this.onPlayerJoin)  this.onPlayerJoin(msg.id, msg.username);         break;
             case 'player_leave': if (this.onPlayerLeave) this.onPlayerLeave(msg.id);                      break;
-            case 'player_move':  if (this.onPlayerMove)  this.onPlayerMove(msg.id, msg.pos, msg.yaw);     break;
+            case 'player_move':  if (this.onPlayerMove)  this.onPlayerMove(msg.id, msg.pos, msg.yaw, msg.pitch);     break;
             case 'host_left':    if (this.onHostLeft)    this.onHostLeft();                                break;
             case 'error':        if (this.onError)       this.onError(msg.message);                       break;
         }

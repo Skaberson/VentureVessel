@@ -5,9 +5,14 @@ import { buildChunkMesh } from '../building/mesher.js';
 const world = new VoxelWorld();
 let voxelMode   = false;
 let useGaussian = true;
+let supercomputerMode = false;
 
 self.onmessage = function(e) {
-    const { type, cx, cy, cz, lod, fullbright, x, y, z, v, sx, sz, inv, mx, mz, dim } = e.data;
+    const { type, cx, cy, cz, lod, fullbright, x, y, z, v, sx, sz, inv, mx, mz, dim, enabled } = e.data;
+
+    if (type === 'setSupercomputer') {
+        supercomputerMode = enabled;
+    }
 
     if (type === 'setVoxelMode') {
         voxelMode = e.data.voxelMode;
@@ -46,7 +51,7 @@ self.onmessage = function(e) {
             }
         }
 
-        const results = buildChunkMesh(world, cx, cy, cz, fullbright, lod || 1, voxelMode, useGaussian);
+        const results = buildChunkMesh(world, cx, cy, cz, fullbright, lod || 1, voxelMode, useGaussian, supercomputerMode);
 
         // Use Transferables to move the geometry data without copying it.
         const transferables = [];

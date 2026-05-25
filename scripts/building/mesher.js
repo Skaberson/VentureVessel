@@ -1,20 +1,23 @@
-import { CHUNK, MAX_Y, MOLTENROCK, STONE, DEEPSTONE, LAVAROCK, DIM_MOON, MOONSTONE, WOODPLANKS, WORKBENCH, WATER, LIGHT_LEVELS } from '../world/world.js';
+import { CHUNK, MAX_Y, MOLTENROCK, STONE, DEEPSTONE, LAVAROCK, DIM_MOON, DIM_FATES, MOONSTONE, VOIDSTONE, WOODPLANKS, WORKBENCH, WATER, LIGHT_LEVELS } from '../world/world.js';
 import { MC_EDGE_TABLE, MC_TRI_TABLE } from './mc_tables.js';
 
-const GAUSS_OFF = [], GAUSS_W = [];
-let GAUSS_SUM = 0;
-for (let dz=-1;dz<=1;dz++) for (let dy=-1;dy<=1;dy++) for (let dx=-1;dx<=1;dx++) {
-    const w = Math.exp(-(dx*dx+dy*dy+dz*dz)*0.4);
-    GAUSS_OFF.push(dx,dy,dz); GAUSS_W.push(w); GAUSS_SUM += w;
-}
-
-// Pre-calculate relative index offsets for the Gaussian weights to speed up the hot loop
-function getGaussIdxOffsets(bsx, bsy) {
-    const offsets = new Int32Array(GAUSS_W.length);
-    for (let i = 0; i < GAUSS_W.length; i++) {
-        offsets[i] = GAUSS_OFF[i*3] + bsx * (GAUSS_OFF[i*3+1] + bsy * GAUSS_OFF[i*3+2]);
+const KERNEL_CACHE = new Map();
+function getGaussKernel(radius, invSigmaSq2) {
+    const key = `${radius},${invSigmaSq2}`;
+    if (KERNEL_CACHE.has(key)) return KERNEL_CACHE.get(key);
+    const off = [], w = [];
+    let sum = 0;
+    for (let dz = -radius; dz <= radius; dz++)
+    for (let dy = -radius; dy <= radius; dy++)
+    for (let dx = -radius; dx <= radius; dx++) {
+        const weight = Math.exp(-(dx * dx + dy * dy + dz * dz) * invSigmaSq2);
+        off.push(dx, dy, dz);
+        w.push(weight);
+        sum += weight;
     }
-    return offsets;
+    const res = { off, w, sum };
+    KERNEL_CACHE.set(key, res);
+    return res;
 }
 
 const CX=[0,1,1,0,0,1,1,0], CY=[0,0,0,0,1,1,1,1], CZ=[0,0,1,1,0,0,1,1];
@@ -22,7 +25,7 @@ const EA=[0,1,2,3,4,5,6,7,0,1,2,3], EB=[1,2,3,0,5,6,7,4,4,5,6,7];
 
 const MIN_BRIGHTNESS = 0.0;
 
-export function buildChunkMesh(world, cx, cy, cz, fullbright = false, lod = 1, voxelMode = false, useGaussian = true) {
+export function buildChunkMesh(world, cx, cy, cz, fullbright = false, lod = 1, voxelMode = false, useGaussian = true, supercomputer = false) {
     const x0 = cx*CHUNK, y0 = cy*CHUNK, z0 = cz*CHUNK;
     const x1 = x0+CHUNK+1;
     const y1 = Math.min(y0+CHUNK+1, MAX_Y+1);
@@ -30,13 +33,10 @@ export function buildChunkMesh(world, cx, cy, cz, fullbright = false, lod = 1, v
 
     // ── Pre-load solid, type, and light into flat buffers ─────────────────────
     // Using flat arrays avoids per-voxel Map lookups inside the hot MC loop.
-    // We need a 1-voxel padding (bx0-1 to bx1+1) to satisfy Gaussian blur and MC lookahead.
-    const bx0 = x0 - 1;
-    const by0 = y0 - 1;
-    const bz0 = z0 - 1;
-    const bx1 = x1 + 1;
-    const by1 = y1 + 1;
-    const bz1 = z1 + 1;
+    // We need padding to satisfy Gaussian blur and MC lookahead.
+    const radius = supercomputer ? 3 : 1;
+    const bx0 = x0 - radius, by0 = y0 - radius, bz0 = z0 - radius;
+    const bx1 = x1 + radius, by1 = y1 + radius, bz1 = z1 + radius;
     const bsx=bx1-bx0+1, bsy=by1-by0+1, bsz=bz1-bz0+1;
     const size = bsx*bsy*bsz;
 
@@ -85,7 +85,13 @@ export function buildChunkMesh(world, cx, cy, cz, fullbright = false, lod = 1, v
     // ── Density cache ─────────────────────────────────────────────────────────
     const dsx=x1-x0+1, dsy=y1-y0+1, dsz=z1-z0+1;
     const densCache = new Float32Array(dsx * dsy * dsz);
-    const gaussIdxOffsets = getGaussIdxOffsets(bsx, bsy);
+    
+    const sigmaFactor = (radius > 1) ? 0.12 : 0.4;
+    const { off: G_OFF, w: G_W, sum: G_SUM } = getGaussKernel(radius, sigmaFactor);
+    const G_IDX = new Int32Array(G_W.length);
+    for (let i = 0; i < G_W.length; i++) {
+        G_IDX[i] = G_OFF[i*3] + bsx * (G_OFF[i*3+1] + bsy * G_OFF[i*3+2]);
+    }
 
     for (let z=z0; z<=z1; z++)
     for (let y=y0; y<=y1; y++)
@@ -98,13 +104,13 @@ export function buildChunkMesh(world, cx, cy, cz, fullbright = false, lod = 1, v
             // Exclude WOODPLANKS and WATER from the Gaussian so smooth terrain doesn't
             // blend into them — these types use box geometry, not MC.
             let sum = 0;
-            for (let i = 0; i < GAUSS_W.length; i++) {
-                const nIdx = baseIdx + gaussIdxOffsets[i];
+            for (let i = 0; i < G_W.length; i++) {
+                const nIdx = baseIdx + G_IDX[i];
                 if (typeBuf[nIdx] !== WOODPLANKS && typeBuf[nIdx] !== WORKBENCH && typeBuf[nIdx] !== WATER) {
-                    sum += GAUSS_W[i] * solidBuf[nIdx];
+                    sum += G_W[i] * solidBuf[nIdx];
                 }
             }
-            densCache[dIdx] = sum / GAUSS_SUM;
+            densCache[dIdx] = sum / G_SUM;
         }
     }
 
@@ -182,7 +188,8 @@ export function buildChunkMesh(world, cx, cy, cz, fullbright = false, lod = 1, v
             if (delta < fallbackDelta) { fallbackDelta = delta; fallbackMat = cornerMat[k]; }
         }
         if (fallbackMat === 0) {
-            fallbackMat = world.dimension === DIM_MOON ? MOONSTONE
+            fallbackMat = world.dimension === DIM_MOON  ? MOONSTONE
+                        : world.dimension === DIM_FATES ? VOIDSTONE
                         : (y < -100) ? LAVAROCK : (y < 100 ? DEEPSTONE : STONE);
         }
 

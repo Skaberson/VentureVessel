@@ -30,10 +30,14 @@ export const WATER      = 22;
 export const STICK      = 23;
 export const WOODPICK   = 24;
 export const MOON_MOUNTAIN_ROCK = 25;
+export const VOIDGRASS = 26;
+export const VOIDDIRT  = 27;
+export const VOIDSTONE = 28;
 
 export const DIM_EARTH  = 0;
 export const DIM_MOON   = 1;
 export const DIM_WATER  = 2;
+export const DIM_FATES  = 3;
 
 const GRASS_DEPTH = 3;
 const DIRT_DEPTH  = 5;
@@ -75,6 +79,29 @@ export function newRandomSeeds() {
     mSeedX  = Math.random() * 10000;
     mSeedZ  = Math.random() * 10000;
     return { bSeedX, bSeedZ, bOffset, mSeedX, mSeedZ };
+}
+
+// Search outward in 32-block steps until we land in the smooth fates biome,
+// then return the XZ and the surface Y so the caller can spawn on the ground.
+export function findFatesSmoothSpawn() {
+    const smoothSurfY = (wx, wz) => {
+        const n = valueNoise(wx/80, 0, wz/80)*0.50
+                + valueNoise(wx/30, 0, wz/30)*0.35
+                + valueNoise(wx/12, 0, wz/12)*0.15;
+        return Math.round(155 + n * 25);
+    };
+    for (let r = 0; r <= 24; r++) {
+        for (let dz = -r; dz <= r; dz++)
+        for (let dx = -r; dx <= r; dx++) {
+            if (Math.abs(dx) !== r && Math.abs(dz) !== r) continue;
+            const wx = dx * 32, wz = dz * 32;
+            if (valueNoise(wx / 250, 0, wz / 250) > 0.5) {
+                const x = wx + 8, z = wz + 8;
+                return { x, y: smoothSurfY(x, z) + 2, z };
+            }
+        }
+    }
+    return { x: 8, y: 182, z: 8 };
 }
 
 function getBiome(wx, wz) {
@@ -202,6 +229,69 @@ export class VoxelWorld {
                     if (wy <= surf) {
                         data[lx + CHUNK*(ly + CHUNK*lz)] = (mntH > 1.5 && wy > baseSurf) ? MOON_MOUNTAIN_ROCK : MOONSTONE;
                     }
+                }
+            }
+            this.chunks.set(key, data);
+            this.lights.set(key, new Uint8Array(CHUNK * CHUNK * CHUNK));
+            return;
+        }
+
+        if (this.dimension === DIM_FATES) {
+            // Biome split: 0 = wild (chaotic), 1 = smooth (forest-like)
+            const fatesBiome = (wx, wz) =>
+                valueNoise(wx / 250, 0, wz / 250) > 0.5 ? 1 : 0;
+
+            const wildSurf = (wx, wz) => {
+                const n = valueNoise(wx/22, 0, wz/22)*0.45
+                        + valueNoise(wx/9,  0, wz/9 )*0.32
+                        + valueNoise(wx/4,  0, wz/4 )*0.15
+                        + valueNoise(wx/1.8,0, wz/1.8)*0.08;
+                return Math.round(120 + n * 110);
+            };
+
+            const smoothSurf = (wx, wz) => {
+                const n = valueNoise(wx/80, 0, wz/80)*0.50
+                        + valueNoise(wx/30, 0, wz/30)*0.35
+                        + valueNoise(wx/12, 0, wz/12)*0.15;
+                return Math.round(155 + n * 25);
+            };
+
+            // Floating voidstone chunk check for the smooth biome (~1 per 40-block grid cell)
+            const FGRID = 40;
+            const isInFloat = (wx, wy, wz) => {
+                const gx = Math.floor(wx / FGRID);
+                const gz = Math.floor(wz / FGRID);
+                for (let dgz = -1; dgz <= 1; dgz++)
+                for (let dgx = -1; dgx <= 1; dgx++) {
+                    const cx = gx + dgx, cz = gz + dgz;
+                    if (hash(cx, 5, cz) < 0.5) continue; // 50% of cells have a chunk
+                    const ox = cx * FGRID + Math.floor(hash(cx, 7,  cz) * FGRID);
+                    const oy = 195       + Math.floor(hash(cx, 13, cz) * 40);
+                    const oz = cz * FGRID + Math.floor(hash(cx, 17, cz) * FGRID);
+                    const r  = 3 + hash(cx, 23, cz) * 4; // radius 3–7
+                    const dx = wx - ox, dy = wy - oy, dz = wz - oz;
+                    if (dx*dx + dy*dy + dz*dz <= r*r) return true;
+                }
+                return false;
+            };
+
+            for (let lz = 0; lz < CHUNK; lz++)
+            for (let lx = 0; lx < CHUNK; lx++) {
+                const wx = x0 + lx, wz = z0 + lz;
+                const biome = fatesBiome(wx, wz);
+                const surf  = biome === 0 ? wildSurf(wx, wz) : smoothSurf(wx, wz);
+
+                for (let ly = 0; ly < CHUNK; ly++) {
+                    const wy = y0 + ly;
+                    let t = AIR;
+                    if (wy <= surf) {
+                        if (wy === surf)         t = VOIDGRASS;
+                        else if (wy >= surf - 4) t = VOIDDIRT;
+                        else                     t = VOIDSTONE;
+                    } else if (biome === 1 && isInFloat(wx, wy, wz)) {
+                        t = VOIDSTONE;
+                    }
+                    data[lx + CHUNK*(ly + CHUNK*lz)] = t;
                 }
             }
             this.chunks.set(key, data);

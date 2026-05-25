@@ -122,8 +122,8 @@ wss.on('connection', ws => {
             case 'position': {
                 const c = clients.get(id);
                 if (!c?.roomId) break;
-                c.pos = msg.pos; c.yaw = msg.yaw;
-                broadcastToRoom(c.roomId, { type: 'player_move', id, pos: msg.pos, yaw: msg.yaw }, id);
+                c.pos = msg.pos; c.yaw = msg.yaw; c.pitch = msg.pitch;
+                broadcastToRoom(c.roomId, { type: 'player_move', id, pos: msg.pos, yaw: msg.yaw, pitch: msg.pitch }, id);
                 break;
             }
 

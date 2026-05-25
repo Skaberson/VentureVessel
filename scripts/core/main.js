@@ -1,11 +1,12 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import {
-    VoxelWorld, CHUNK, MIN_Y, MAX_Y, MIN_CY, MAX_CY, BIOME_FOREST, BIOME_DESERT, BIOME_TUNDRA, DIM_EARTH, DIM_MOON, DIM_WATER,
+    VoxelWorld, CHUNK, MIN_Y, MAX_Y, MIN_CY, MAX_CY, BIOME_FOREST, BIOME_DESERT, BIOME_TUNDRA, DIM_EARTH, DIM_MOON, DIM_WATER, DIM_FATES,
     SAND, PYRAMID_CHANCE, hash, bSeedX, bSeedZ, bOffset, mSeedX, mSeedZ,
     GRASS, DIRT, STONE, WOOD, LEAVES, SANDSTONE, CACTUS, ICE, PFROST, IGRASS, PINEWOOD, PINELEAVES, DEEPSTONE, LAVAROCK, MOLTENROCK, MOONSTONE,
     WOODPLANKS, WORKBENCH, WOODCHIP, FLINT, WATER, STICK, WOODPICK, MOON_MOUNTAIN_ROCK,
-    syncBiomeParams, newRandomSeeds
+    VOIDGRASS, VOIDDIRT, VOIDSTONE,
+    syncBiomeParams, newRandomSeeds, findFatesSmoothSpawn
 } from '../world/world.js';
 import { listWorlds, saveWorld, loadWorld } from '../world/save.js';
 import { buildChunkMesh } from '../building/mesher.js';
@@ -22,9 +23,13 @@ import { NetworkManager } from './network.js';
 import { WS_URL, HTTP_URL } from '../config.js';
 
 const net           = new NetworkManager();
-const remotePlayers = new Map(); // id -> { mesh, labelEl, pos, targetPos, yaw }
-let isLanOpen    = false;
-let localUsername = '';
+const remotePlayers = new Map(); // id -> { model, labelEl, pos, targetPos, yaw, walkCycle }
+let isLanOpen     = false;
+let localUsername  = '';
+let localModel     = null; // { scene, rightArm, leftArm, rightLeg, leftLeg, walkCycle }
+let playerModelTemplate = null;
+let thirdPerson    = false;
+let scOpen         = false;
 
 // ── Renderer ──────────────────────────────────────────────────────────────────
 const renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -40,6 +45,7 @@ const forestSkyColor = new THREE.Color(0x87ceeb);
 const desertSkyColor = new THREE.Color(0xd2b48c);
 const tundraSkyColor = new THREE.Color(0xdaeef2);
 const waterSkyColor  = new THREE.Color(0x0a2a4a);
+const fatesSkyColor  = new THREE.Color(0x5a00aa);
 const currentSkyColor = forestSkyColor.clone();
 const spaceColor = new THREE.Color(0x020205);
 const nightSkyColor  = new THREE.Color(0x050510);
@@ -311,6 +317,9 @@ const MATS = {
     16: new THREE.MeshLambertMaterial({ map: loadTex('assets/prototype/underground/moltenrock.png'),vertexColors: true, transparent: true, fog: false }),
     17: new THREE.MeshLambertMaterial({ map: loadTex('assets/prototype/moon/moonstone.png'),        vertexColors: true, transparent: true, fog: false }),
     25: new THREE.MeshLambertMaterial({ map: loadTex('assets/prototype/moon/moon_mountain_rock.png'), vertexColors: true, transparent: true, fog: false }),
+    26: new THREE.MeshLambertMaterial({ map: loadTex('assets/prototype/fates/voidgrass.png'),        vertexColors: true, transparent: true, fog: false }),
+    27: new THREE.MeshLambertMaterial({ map: loadTex('assets/prototype/fates/voiddirt.png'),         vertexColors: true, transparent: true, fog: false }),
+    28: new THREE.MeshLambertMaterial({ map: loadTex('assets/prototype/fates/voidstone.png'),        vertexColors: true, transparent: true, fog: false }),
     18: new THREE.MeshLambertMaterial({ map: loadTex('assets/prototype/crafted/woodplanks.png'),    vertexColors: true, transparent: true, fog: false, side: THREE.DoubleSide }),
     22: new THREE.ShaderMaterial({ uniforms: waterUniforms, vertexShader: WATER_VERT, fragmentShader: WATER_FRAG, transparent: true, depthWrite: false, side: THREE.DoubleSide, fog: true }),
 };
@@ -751,6 +760,9 @@ const VOXEL_IMAGES = {
     15: 'assets/prototype/underground/lavarock.png',
     18: 'assets/prototype/crafted/woodplanks.png',
     25: 'assets/prototype/moon/moon_mountain_rock.png',
+    26: 'assets/prototype/fates/voidgrass.png',
+    27: 'assets/prototype/fates/voiddirt.png',
+    28: 'assets/prototype/fates/voidstone.png',
 };
 
 // ── Isometric block previews ──────────────────────────────────────────────────
@@ -1085,6 +1097,10 @@ window.addEventListener('keydown', e => {
     }
     if (e.code === 'Escape' && inventoryOpen) {
         closeInventory();
+    }
+    if (e.shiftKey && e.code === 'KeyZ' && gameActive) {
+        thirdPerson = !thirdPerson;
+        showFeedback(thirdPerson ? 'third person' : 'first person');
     }
 });
 
@@ -1518,7 +1534,8 @@ const ultimateUniforms = {
     uBOffset:      { value: bOffset },
     uMSeedX:       { value: mSeedX },
     uMSeedZ:       { value: mSeedZ },
-    uIsMoon:       { value: 0.0 },
+    uIsMoon:         { value: 0.0 },
+    uIsFates:        { value: 0.0 },
     uColorForest:    { value: new THREE.Color(0x6b8c3a) },
     uColorDesert:    { value: new THREE.Color(0xc2b280) },
     uColorTundra:    { value: new THREE.Color(0xb0ccd0) },
@@ -1527,6 +1544,8 @@ const ultimateUniforms = {
     uColorMtnForest: { value: new THREE.Color(0x888888) },
     uColorMtnDesert: { value: new THREE.Color(0xb0a080) },
     uColorMtnTundra: { value: new THREE.Color(0xd0e0e8) },
+    uColorVoidGrass: { value: new THREE.Color(0x3a1a5c) },
+    uColorVoidDirt:  { value: new THREE.Color(0x1e0f2e) },
     uLoadedMask:   { value: lodMaskTex },
     uUlodR:        { value: ULOD_R },
     uUlodSide:     { value: ULOD_SIDE },
@@ -1549,7 +1568,7 @@ async function sampleTexAvgColor(url) {
 }
 
 (async () => {
-    const [grass, sand, igrass, stone, sandstone, ice, moonMtn] = await Promise.all([
+    const [grass, sand, igrass, stone, sandstone, ice, moonMtn, voidGrass, voidDirt] = await Promise.all([
         sampleTexAvgColor('assets/prototype/forest/grass.png'),
         sampleTexAvgColor('assets/prototype/desert/sand.png'),
         sampleTexAvgColor('assets/prototype/snow/igrass.png'),
@@ -1557,6 +1576,8 @@ async function sampleTexAvgColor(url) {
         sampleTexAvgColor('assets/prototype/desert/sandstone.png'),
         sampleTexAvgColor('assets/prototype/snow/ice.png'),
         sampleTexAvgColor('assets/prototype/moon/moon_mountain_rock.png'),
+        sampleTexAvgColor('assets/prototype/fates/voidgrass.png'),
+        sampleTexAvgColor('assets/prototype/fates/voiddirt.png'),
     ]);
     ultimateUniforms.uColorForest.value.copy(grass);
     ultimateUniforms.uColorDesert.value.copy(sand);
@@ -1567,6 +1588,8 @@ async function sampleTexAvgColor(url) {
     // Moon LOD uses a fixed light grey; mountain areas use the sampled texture colour darkened slightly
     ultimateUniforms.uColorMoon.value.set(0xc0c0c8);
     ultimateUniforms.uColorMtnMoon.value.copy(moonMtn).multiplyScalar(0.75);
+    ultimateUniforms.uColorVoidGrass.value.copy(voidGrass);
+    ultimateUniforms.uColorVoidDirt.value.copy(voidDirt);
 })();
 
 const ultimateLodMat = new THREE.ShaderMaterial({
@@ -1587,6 +1610,7 @@ uniform float uBOffset;
 uniform float uMSeedX;
 uniform float uMSeedZ;
 uniform float uIsMoon;
+uniform float uIsFates;
 uniform vec3  uColorForest;
 uniform vec3  uColorDesert;
 uniform vec3  uColorTundra;
@@ -1595,6 +1619,8 @@ uniform vec3  uColorMtnMoon;
 uniform vec3  uColorMtnForest;
 uniform vec3  uColorMtnDesert;
 uniform vec3  uColorMtnTundra;
+uniform vec3  uColorVoidGrass;
+uniform vec3  uColorVoidDirt;
 
 out vec3 vColor;
 out vec2 vChunkOffset;
@@ -1657,6 +1683,29 @@ float surfaceY(float wx, float wz) {
     return 154.0 + n * 28.0 + mountainNoise(wx, wz);
 }
 
+// ── Fates wild surface height ─────────────────────────────────────────────────
+float fatesSurfaceY(float wx, float wz) {
+    float n = valueNoise(wx / 22.0, 0.0, wz / 22.0) * 0.45
+            + valueNoise(wx /  9.0, 0.0, wz /  9.0) * 0.32
+            + valueNoise(wx /  4.0, 0.0, wz /  4.0) * 0.15
+            + valueNoise(wx /  1.8, 0.0, wz /  1.8) * 0.08;
+    return 120.0 + n * 110.0;
+}
+
+// ── Fates smooth surface height (matches smoothSurf formula) ──────────────────
+float fatesSmoothSurfaceY(float wx, float wz) {
+    float n = valueNoise(wx / 80.0, 0.0, wz / 80.0) * 0.50
+            + valueNoise(wx / 30.0, 0.0, wz / 30.0) * 0.35
+            + valueNoise(wx / 12.0, 0.0, wz / 12.0) * 0.15;
+    return 155.0 + n * 25.0;
+}
+
+// ── Fates biome blend (0 = wild, 1 = smooth, matches JS fatesBiome) ───────────
+float fatesBiomeT(float wx, float wz) {
+    float raw = valueNoise(wx / 250.0, 0.0, wz / 250.0);
+    return clamp((raw - 0.4) / 0.2, 0.0, 1.0);
+}
+
 // ── Biome FBM (matches world.js biomeFBM / getBiome) ─────────────────────────
 float biomeValue(float wx, float wz) {
     float val = 0.0, amp = 0.5, freq = 1.0;
@@ -1673,7 +1722,14 @@ float biomeValue(float wx, float wz) {
 void main() {
     float wx = (float(uCenterCX) + position.x) * 16.0;
     float wz = (float(uCenterCZ) + position.z) * 16.0;
-    float wy = surfaceY(wx, wz);
+    float wy;
+    float fatesBT = 0.0;
+    if (uIsFates > 0.5) {
+        fatesBT = fatesBiomeT(wx, wz);
+        wy = mix(fatesSurfaceY(wx, wz), fatesSmoothSurfaceY(wx, wz), fatesBT);
+    } else {
+        wy = surfaceY(wx, wz);
+    }
 
     // Planet curve
     float cdx = wx - uCamXZ.x;
@@ -1692,7 +1748,13 @@ void main() {
     }
 
     // Biome colour
-    if (uIsMoon > 0.5) {
+    if (uIsFates > 0.5) {
+        // Height relative to each biome's range, blended between them
+        float tLow  = mix(120.0, 155.0, fatesBT);
+        float tHigh = mix(230.0, 180.0, fatesBT);
+        float ct = clamp((wy - tLow) / max(tHigh - tLow, 1.0), 0.0, 1.0);
+        vColor = mix(uColorVoidDirt, uColorVoidGrass, ct * ct);
+    } else if (uIsMoon > 0.5) {
         float mnt = mountainNoise(wx, wz);
         vColor = (mnt > 1.5) ? uColorMtnMoon : uColorMoon;
     } else {
@@ -1737,6 +1799,8 @@ void main() {
 }`,
 });
 
+let ultimateLodMesh = null;
+
 // Build the grid once — positions are integer chunk offsets (dx, 0, dz).
 // The vertex shader converts them to world space via uCenterCX/CZ each frame.
 (function buildUltimateGrid() {
@@ -1762,11 +1826,11 @@ void main() {
     geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
     geo.setIndex(indices);
 
-    const mesh = new THREE.Mesh(geo, ultimateLodMat);
-    mesh.frustumCulled = false; // bounding box is in offset-space, not world-space
-    mesh.castShadow    = false;
-    mesh.receiveShadow = false;
-    scene.add(mesh);
+    ultimateLodMesh = new THREE.Mesh(geo, ultimateLodMat);
+    ultimateLodMesh.frustumCulled = false; // bounding box is in offset-space, not world-space
+    ultimateLodMesh.castShadow    = false;
+    ultimateLodMesh.receiveShadow = false;
+    scene.add(ultimateLodMesh);
 }());
 
 // Initialize Workers
@@ -1835,7 +1899,7 @@ function rebuildChunk(cx, cy, cz, lod = 1) {
         for (let dy = -1; dy <= 1; dy++)
         for (let dx = -1; dx <= 1; dx++)
             world.get((cx + dx) * CHUNK, (cy + dy) * CHUNK, (cz + dz) * CHUNK);
-        const results = buildChunkMesh(world, cx, cy, cz, fullbright, lod, voxelMode, useGaussian);
+        const results = buildChunkMesh(world, cx, cy, cz, fullbright, lod, voxelMode, useGaussian, supercomputerMode);
         applyMeshResults(cx, cy, cz, lod, results);
         pendingChunks.delete(key);
     } else {
@@ -1868,11 +1932,15 @@ function updateChunkStream() {
     for (let dx = -SUPER_LOD_DIST; dx <= SUPER_LOD_DIST; dx++)
     for (let dz = -SUPER_LOD_DIST; dz <= SUPER_LOD_DIST; dz++) {
         const dist = Math.max(Math.abs(dx), Math.abs(dz));
+        let baseLod = 1;
+        if (currentQuality === 'medium') baseLod = 2;
+        else if (currentQuality === 'potato') baseLod = 3;
+
         let lod;
-        if      (dist <= RENDER_DIST)   lod = 1;
-        else if (dist <= MID_LOD_DIST)  lod = 2;
-        else if (dist <= MAX_LOD_DIST)  lod = 4;
-        else                            lod = 8;
+        if      (dist <= RENDER_DIST)   lod = baseLod;
+        else if (dist <= MID_LOD_DIST)  lod = Math.max(baseLod, 2);
+        else if (dist <= MAX_LOD_DIST)  lod = Math.max(baseLod, 4);
+        else                            lod = Math.max(baseLod, 8);
 
         const cy0 = (lod >= 2 && zone === 0) ? Math.max(startCY, DISTANT_CY_FLOOR) : startCY;
         for (let cy = cy0; cy <= endCY; cy++)
@@ -1896,13 +1964,13 @@ function updateChunkStream() {
         const entry = loadedChunks.get(key);
         const pendingLod = pendingChunks.get(key);
 
-        // We need a rebuild if it's missing or lower quality than desired.
+        // We need a rebuild if it's missing or the quality differs from desired.
         // However, don't request it if there's already a request in flight 
         // that is equal to or better than the one we want.
-        const needsUpgrade = !entry || entry.lod > lod;
+        const needsChange = !entry || entry.lod !== lod;
         const isBetterPending = pendingLod !== undefined && pendingLod <= lod;
 
-        if (needsUpgrade && !isBetterPending) {
+        if (needsChange && !isBetterPending) {
             const [cx, cy, cz] = key.split(',').map(Number);
             const dist = (cx - pcx) ** 2 + (cz - pcz) ** 2;
             toAdd.push({ cx, cy, cz, dist, lod });
@@ -1941,6 +2009,7 @@ let fpsMode        = false;
 let stopFade       = false;
 let speedMultiplier = 1;
 let isFlying       = false;
+let supercomputerMode = false;
 
 // ── Save / load state ─────────────────────────────────────────────────────────
 let gameActive       = false;          // true once a game (new or loaded) has started
@@ -1969,6 +2038,8 @@ function applyQualityProfile(name) {
     applyResolution(p.resolution);
     applyShadowRes(p.shadows);
     applyGaussian(p.gaussian);
+    // Force chunk stream re-evaluation to apply new LOD baseline
+    lastPCX = null;
 }
 
 const settingsOverlay = document.createElement('div');
@@ -2397,8 +2468,8 @@ document.addEventListener('pointerlockchange', () => {
     if (document.pointerLockElement) {
         hasStartedPlaying = true;
         overlay.style.display = 'none';
-    } else if (inventoryOpen) {
-        overlay.style.display = 'none'; // inventory handles its own state
+    } else if (inventoryOpen || scOpen) {
+        overlay.style.display = 'none'; // inventory/sc handles its own state
     } else if (!gameActive) {
         overlay.style.display = 'none'; // main menu is handling the screen
     } else if (hasStartedPlaying && !getIsDead()) {
@@ -2448,6 +2519,9 @@ const rayDir = new THREE.Vector3();
 const _meshRaycaster = new THREE.Raycaster();
 _meshRaycaster.far = 12;
 const _magnetNormal = new THREE.Vector3();
+const _camTarget = new THREE.Vector3();
+const _camDir    = new THREE.Vector3();
+const _camHit    = new THREE.Vector3();
 const hud    = document.getElementById('hud');
 const fpsDisplay = document.createElement('div');
 fpsDisplay.style.cssText = 'color:white;font-family:monospace;font-size:13px;text-shadow:1px 1px 1px black;display:none;';
@@ -2525,6 +2599,56 @@ function _btnRow(...btns) {
     btns.forEach(b => row.appendChild(b));
     return row;
 }
+
+// ── Supercomputer Modal ───────────────────────────────────────────────────────
+const scOverlay = _modalOverlay(6000);
+const scBox     = _modalBox();
+scBox.style.minWidth = '300px';
+scOverlay.appendChild(scBox);
+scBox.appendChild(_modalTitle('Supercomputer Mode'));
+
+const scLabel = document.createElement('div');
+scLabel.style.cssText = 'font-size:12px;color:#aaa;';
+scLabel.textContent = 'Blur Intensity (Radius):';
+scBox.appendChild(scLabel);
+
+const scSlider = document.createElement('input');
+scSlider.type = 'range';
+scSlider.min = '1';
+scSlider.max = '6';
+scSlider.value = '3';
+scSlider.style.cssText = 'width:100%;cursor:pointer;';
+scBox.appendChild(scSlider);
+
+const scInput = document.createElement('input');
+scInput.type = 'number';
+scInput.value = '3';
+scInput.style.cssText = 'font-family:monospace;font-size:14px;color:#adf;text-align:center;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.15);border-radius:4px;width:60px;margin:0 auto;display:block;outline:none;';
+scInput.addEventListener('keydown', e => e.stopPropagation());
+scInput.addEventListener('click', e => e.stopPropagation());
+scSlider.oninput = () => { scInput.value = scSlider.value; };
+scInput.oninput  = () => { scSlider.value = scInput.value; };
+scBox.appendChild(scInput);
+
+const scApplyBtn = _btn('Apply', 'border:1px solid rgba(100,255,100,0.4);background:rgba(100,255,100,0.1);color:#afffba;');
+scBox.appendChild(_btnRow(scApplyBtn));
+
+scApplyBtn.addEventListener('click', () => {
+    const radius = parseInt(scInput.value) || 1;
+    supercomputerMode = radius > 1 ? radius : false;
+    scOverlay.style.display = 'none';
+    scOpen = false;
+    
+    broadcastWorkers({ type: 'setSupercomputer', enabled: supercomputerMode });
+    for (const key of Array.from(loadedChunks.keys())) {
+        const [cx, cy, cz] = key.split(',').map(Number);
+        const entry = loadedChunks.get(key);
+        rebuildChunk(cx, cy, cz, entry ? entry.lod : 1);
+    }
+    
+    showFeedback(`supercomputer mode: radius ${radius}`);
+    renderer.domElement.requestPointerLock();
+});
 
 // ── New game modal ────────────────────────────────────────────────────────────
 const ngOverlay = _modalOverlay(5100);
@@ -2892,7 +3016,9 @@ function startMoonTransition() {
         world.dimension = DIM_MOON;
         broadcastWorkers({ type: 'setDimension', dim: DIM_MOON });
         curveUniforms.uPlanetRadius.value = MOON_PLANET_RADIUS;
-        ultimateUniforms.uIsMoon.value = 1.0;
+        ultimateUniforms.uIsMoon.value  = 1.0;
+        ultimateUniforms.uIsFates.value = 0.0;
+        setTerrainFog(false);
 
         // Clear current meshes
         for (const entry of loadedChunks.values()) {
@@ -2924,7 +3050,9 @@ function startEarthTransition() {
         world.dimension = DIM_EARTH;
         broadcastWorkers({ type: 'setDimension', dim: DIM_EARTH });
         curveUniforms.uPlanetRadius.value = EARTH_PLANET_RADIUS;
-        ultimateUniforms.uIsMoon.value = 0.0;
+        ultimateUniforms.uIsMoon.value  = 0.0;
+        ultimateUniforms.uIsFates.value = 0.0;
+        setTerrainFog(false);
 
         // Clear current meshes
         for (const entry of loadedChunks.values()) {
@@ -2954,7 +3082,9 @@ function startWaterTransition() {
         world.dimension = DIM_WATER;
         broadcastWorkers({ type: 'setDimension', dim: DIM_WATER });
         curveUniforms.uPlanetRadius.value = EARTH_PLANET_RADIUS;
-        ultimateUniforms.uIsMoon.value = 0.0;
+        ultimateUniforms.uIsMoon.value  = 0.0;
+        ultimateUniforms.uIsFates.value = 0.0;
+        setTerrainFog(false);
 
         for (const entry of loadedChunks.values()) {
             for (const m of entry.meshes) { scene.remove(m); m.geometry.dispose(); }
@@ -2971,6 +3101,134 @@ function startWaterTransition() {
 
         fadeOverlay.style.opacity = '0';
         setTimeout(() => isTransitioning = false, 1000);
+    }, 1000);
+}
+
+function setTerrainFog(enabled) {
+    for (const m of Object.values(MATS)) {
+        if (m.fog !== enabled) {
+            m.fog = enabled;
+            m.needsUpdate = true;
+        }
+    }
+}
+
+function startFatesTransition() {
+    isTransitioning = true;
+    fadeOverlay.style.opacity = '1';
+
+    setTimeout(() => {
+        world.dimension = DIM_FATES;
+        broadcastWorkers({ type: 'setDimension', dim: DIM_FATES });
+        curveUniforms.uPlanetRadius.value = EARTH_PLANET_RADIUS;
+        ultimateUniforms.uIsMoon.value  = 0.0;
+        ultimateUniforms.uIsFates.value = 1.0;
+        setTerrainFog(true);
+
+        for (const entry of loadedChunks.values()) {
+            for (const m of entry.meshes) { scene.remove(m); m.geometry.dispose(); }
+        }
+        loadedChunks.clear();
+        markLodMaskDirty();
+        buildQueue.length = 0;
+        pendingChunks.clear();
+        pendingMiningChunks.clear();
+
+        const fatesSpawn = findFatesSmoothSpawn();
+        player.pos.set(150, fatesSpawn.y, 450);
+        player.vel.set(0, 0, 0);
+
+        fadeOverlay.style.opacity = '0';
+        setTimeout(() => {
+            isTransitioning = false;
+            startFatesCountdown();
+        }, 1000);
+    }, 1000);
+}
+
+function respawnFromFates() {
+    isTransitioning = true;
+    world.dimension = DIM_EARTH;
+    broadcastWorkers({ type: 'setDimension', dim: DIM_EARTH });
+    curveUniforms.uPlanetRadius.value = EARTH_PLANET_RADIUS;
+    ultimateUniforms.uIsMoon.value  = 0.0;
+    ultimateUniforms.uIsFates.value = 0.0;
+    setTerrainFog(false);
+
+    for (const entry of loadedChunks.values()) {
+        for (const m of entry.meshes) { scene.remove(m); m.geometry.dispose(); }
+    }
+    loadedChunks.clear();
+    markLodMaskDirty();
+    buildQueue.length = 0;
+    pendingChunks.clear();
+    pendingMiningChunks.clear();
+
+    const spawnY = world.surfaceAt(8, 8) + 2;
+    player.pos.set(8, spawnY, 8);
+    player.vel.set(0, 0, 0);
+    isFlying = false;
+
+    fadeOverlay.style.opacity = '0';
+    setTimeout(() => {
+        isTransitioning = false;
+        document.body.requestPointerLock?.();
+    }, 1000);
+}
+
+function startFatesCountdown() {
+    let count = 20;
+    let elapsed = 0;
+
+    const el = document.createElement('div');
+    el.textContent = '20';
+    Object.assign(el.style, {
+        position: 'fixed',
+        zIndex: '4000',
+        pointerEvents: 'none',
+        userSelect: 'none',
+        fontFamily: 'monospace',
+        fontWeight: 'bold',
+        color: 'rgba(220, 200, 255, 1)',
+        textShadow: '0 0 40px rgba(180, 100, 255, 0.9), 0 0 100px rgba(180, 100, 255, 0.4)',
+        opacity: '0',
+        fontSize: '20vw',
+        lineHeight: '1',
+        top: '50%',
+        left: '50%',
+        transform: 'translate(-50%, -50%)',
+        transition: 'opacity 0.6s ease',
+    });
+    document.body.appendChild(el);
+
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+        el.style.opacity = '1';
+    }));
+
+    const interval = setInterval(() => {
+        elapsed++;
+        count--;
+
+        if (count <= 0) {
+            clearInterval(interval);
+            el.textContent = '0';
+            fadeOverlay.style.opacity = '1';
+            setTimeout(() => {
+                el.remove();
+                respawnFromFates();
+            }, 1000);
+            return;
+        }
+
+        el.textContent = String(count);
+
+        if (elapsed === 2) {
+            el.style.transition = 'opacity 0.5s ease, font-size 0.8s cubic-bezier(0.4,0,0.2,1), top 0.8s cubic-bezier(0.4,0,0.2,1), left 0.8s cubic-bezier(0.4,0,0.2,1), transform 0.8s cubic-bezier(0.4,0,0.2,1)';
+            el.style.fontSize = '2.5rem';
+            el.style.top = 'calc(100vh - 16px)';
+            el.style.left = '16px';
+            el.style.transform = 'translate(0, -100%)';
+        }
     }, 1000);
 }
 
@@ -3002,6 +3260,7 @@ const CMD_REGISTRY = [
     { cmd: '/ptp',        display: '/ptp' },
     { cmd: '/kill',       display: '/kill' },
     { cmd: '/re',         display: '/re' },
+    { cmd: '/sc',         display: '/sc' },
     { cmd: '/tpr',        display: '/tpr' },
     { cmd: '/tskip',      display: '/tskip' },
     { cmd: '/vox',        display: '/vox' },
@@ -3184,6 +3443,8 @@ cmdInput.addEventListener('keydown', e => {
                     broadcastWorkers({ type: 'setDimension', dim: DIM_EARTH });
                     curveUniforms.uPlanetRadius.value = EARTH_PLANET_RADIUS;
                     ultimateUniforms.uIsMoon.value = 0.0;
+                    ultimateUniforms.uIsFates.value = 0.0;
+                    setTerrainFog(false);
                     for (const entry of loadedChunks.values()) {
                         for (const m of entry.meshes) { scene.remove(m); m.geometry.dispose(); }
                     }
@@ -3231,6 +3492,8 @@ cmdInput.addEventListener('keydown', e => {
                 broadcastWorkers({ type: 'setDimension', dim: DIM_EARTH });
                 curveUniforms.uPlanetRadius.value = EARTH_PLANET_RADIUS;
                 ultimateUniforms.uIsMoon.value = 0.0;
+                ultimateUniforms.uIsFates.value = 0.0;
+                setTerrainFog(false);
                 for (const entry of loadedChunks.values()) {
                     for (const m of entry.meshes) { scene.remove(m); m.geometry.dispose(); }
                 }
@@ -3246,6 +3509,10 @@ cmdInput.addEventListener('keydown', e => {
             camera.position.copy(player.getEyePosition());
             camera.rotation.copy(player.getCameraRotation());
             showFeedback('respawned');
+        } else if (cmd === '/sc') {
+            scOpen = true;
+            document.exitPointerLock();
+            scOverlay.style.display = 'flex';
         } else if (cmd === '/fly') {
             flyMode = !flyMode;
             if (!flyMode) isFlying = false;
@@ -3463,7 +3730,7 @@ function rebuildChunkMining(cx, cy, cz, lod = 1) {
         for (let dy = -1; dy <= 1; dy++)
         for (let dx = -1; dx <= 1; dx++)
             world.get((cx + dx) * CHUNK, (cy + dy) * CHUNK, (cz + dz) * CHUNK);
-        const results = buildChunkMesh(world, cx, cy, cz, fullbright, lod, voxelMode, useGaussian);
+        const results = buildChunkMesh(world, cx, cy, cz, fullbright, lod, voxelMode, useGaussian, supercomputerMode);
         applyMeshResults(cx, cy, cz, lod, results);
         pendingMiningChunks.delete(key);
     } else {
@@ -3481,7 +3748,7 @@ function updateAffectedChunks(x, y, z) {
 
 
 // ── Slime System ─────────────────────────────────────────────────────────────
-initSlimes(scene, world, player, camera, showFeedback);
+initSlimes(scene, world, player, camera, showFeedback, applyPlanetCurve, curveDepthMat);
 
 // ── Gravestone System ─────────────────────────────────────────────────────────
 initGravestones(scene, world, input, spawnDrop, shake);
@@ -3499,6 +3766,7 @@ initHealth({
     setSelectedSlot: (v) => { selectedSlot = v; },
     updateInventoryUI,
     shake,
+    onRebirth: startFatesTransition,
 });
 
 // ── Gameplay ──────────────────────────────────────────────────────────────────
@@ -3565,24 +3833,27 @@ function animate() {
 
     const isMoon  = world.dimension === DIM_MOON;
     const isWater = world.dimension === DIM_WATER;
+    const isFates = world.dimension === DIM_FATES;
 
     // Darken biome sky based on sun position
     if (isWater) {
         currentSkyColor.lerp(waterSkyColor, dt * 4);
+    } else if (isFates) {
+        currentSkyColor.lerp(fatesSkyColor, dt * 4);
     } else {
         currentSkyColor.lerp(biomeSky, dt * 2);
     }
-    tempColor.copy(currentSkyColor).lerp(nightSkyColor, isWater ? 0 : 1 - dayIntensity);
+    tempColor.copy(currentSkyColor).lerp(nightSkyColor, (isWater || isFates) ? 0 : 1 - dayIntensity);
 
     const height = player.pos.y;
 
     // Transition starts at cloud height (170) and reaches vacuum by y=430
-    const spaceT = (isMoon || isWater) ? (isMoon ? 1 : 0) : Math.min(Math.max((height - CLOUD_Y) / 260, 0), 1);
+    const spaceT = (isMoon || isWater || isFates) ? (isMoon ? 1 : 0) : Math.min(Math.max((height - CLOUD_Y) / 260, 0), 1);
 
     scene.background.lerpColors(tempColor, spaceColor, spaceT);
 
     // Dawn/dusk: blend a warm orange glow into the sky when the sun is near the horizon
-    if (!isMoon && !isWater && spaceT < 0.95) {
+    if (!isMoon && !isWater && !isFates && spaceT < 0.95) {
         const horizonBlend = Math.max(0, 1.0 - Math.abs(sunYMult) * 3.5) * (1 - spaceT);
         scene.background.lerp(dawnDuskColor, horizonBlend * 0.45);
     }
@@ -3593,7 +3864,13 @@ function animate() {
     } else if (isWater) {
         scene.fog.color.copy(scene.background);
         scene.fog.density = 0.012;
+    } else if (isFates) {
+        scene.background.set(0x5a00aa);
+        scene.fog.color.set(0x5a00aa);
+        scene.fog.density = 0.04;
+        if (ultimateLodMesh) ultimateLodMesh.visible = false;
     } else {
+        if (ultimateLodMesh) ultimateLodMesh.visible = true;
         scene.fog.color.copy(scene.background);
         scene.fog.density = (0.006 + (1 - dayIntensity) * 0.004) * (1 - spaceT);
     }
@@ -3666,7 +3943,7 @@ function animate() {
     // Planet sphere positions + opacity.
     // Opacity is driven solely by terrainOpacity in DIM_EARTH so the spheres are
     // never culled by any other mechanism — they fade in as terrain fades out.
-    if (isWater) {
+    if (isWater || isFates) {
         earthSphere.material.opacity = 0;
         cloudSphere.material.opacity = 0;
         atmosphereMat.uniforms.opacity.value = 0;
@@ -3729,7 +4006,7 @@ function animate() {
     }
     moonSphere.rotation.y += dt * 0.02;
 
-    const cloudVisible = !isMoon && !isWater;
+    const cloudVisible = !isMoon && !isWater && !isFates;
     cloudLayerGroups.forEach(({ group, clouds, baseOpacity, baseY, layerThickness }) => {
         group.position.x = player.pos.x;
         group.position.z = player.pos.z;
@@ -3816,7 +4093,7 @@ function animate() {
     player.update(dt, input, isFlying, inceptionMode, speedMultiplier, inWater);
 
     if (net.connected) {
-        net.tickPositionBroadcast(dt, player.pos, player.yaw);
+        net.tickPositionBroadcast(dt, player.pos, player.yaw, player.pitch);
         updateRemotePlayers(dt);
     }
 
@@ -3833,8 +4110,47 @@ function animate() {
     }
 
     if (player && player.pos) {
-        camera.position.copy(player.getEyePosition());
-        camera.rotation.copy(player.getCameraRotation());
+        if (thirdPerson) {
+            const targetY = player.pos.y + EYE_HEIGHT * 0.7;
+            _camTarget.set(player.pos.x, targetY, player.pos.z);
+            const idealDist = 5;
+
+            // Compute direction from player to ideal camera position
+            _camDir.set(
+                Math.sin(player.yaw) * Math.cos(player.pitch),
+                -Math.sin(player.pitch),
+                Math.cos(player.yaw) * Math.cos(player.pitch)
+            );
+
+            // Check for voxel obstructions along the camera path
+            const hit = raycastVoxel(world, _camTarget, _camDir, idealDist);
+            let camDist = idealDist;
+
+            if (hit) {
+                // If obstructed, clamp distance to just before the block
+                _camHit.set(hit.x + 0.5, hit.y + 0.5, hit.z + 0.5);
+                camDist = Math.max(0.4, _camTarget.distanceTo(_camHit) - 0.8);
+            }
+
+            camera.position.set(
+                _camTarget.x + _camDir.x * camDist,
+                _camTarget.y + _camDir.y * camDist,
+                _camTarget.z + _camDir.z * camDist
+            );
+            camera.lookAt(player.pos.x, targetY, player.pos.z);
+        } else {
+            camera.position.copy(player.getEyePosition());
+            camera.rotation.copy(player.getCameraRotation());
+        }
+
+        if (localModel) {
+            for (const m of localModel.meshes) {
+                if (thirdPerson) m.layers.enable(0); else m.layers.disable(0);
+            }
+            localModel.scene.position.set(player.pos.x, player.pos.y, player.pos.z);
+            localModel.scene.rotation.y = player.yaw + Math.PI / 2;
+            _animateModel(localModel, horizontalSpeed, dt, player.pitch);
+        }
 
         curveUniforms.uCamXZ.value.set(camera.position.x, camera.position.z);
         ultimateUniforms.uCenterCX.value = Math.floor(player.pos.x / CHUNK);
@@ -4128,13 +4444,52 @@ document.body.appendChild(remoteLabelsEl);
 
 const _rpScreen = new THREE.Vector3();
 
+// ── Player model ──────────────────────────────────────────────────────────────
+
+new GLTFLoader().load('/assets/models/player1.glb', gltf => {
+    playerModelTemplate = gltf.scene;
+    playerModelTemplate.traverse(o => { if (o.isMesh) o.castShadow = true; });
+    localModel = _makePlayerModel();
+    // Layer 2: visible to shadow cameras always, hidden from main camera in first person
+    localModel.scene.traverse(o => { if (o.isMesh) o.layers.enable(2); });
+    sunLight.shadow.camera.layers.enable(2);
+    moonLight.shadow.camera.layers.enable(2);
+    scene.add(localModel.scene);
+});
+
+function _makePlayerModel() {
+    const root   = playerModelTemplate.clone(true);
+    root.scale.setScalar(0.75);
+    const meshes = [];
+    root.traverse(o => { if (o.isMesh) meshes.push(o); });
+    return {
+        scene:     root,
+        meshes,
+        head:      root.getObjectByName('head'),
+        rightArm:  root.getObjectByName('right_arm'),
+        leftArm:   root.getObjectByName('left_arm'),
+        rightLeg:  root.getObjectByName('right_leg'),
+        leftLeg:   root.getObjectByName('left_leg'),
+        walkCycle: 0,
+    };
+}
+
+function _animateModel(pm, speed, dt, pitch = 0) {
+    pm.walkCycle += dt * 10;
+    const amp = Math.min(speed * 0.06, 0.55);
+    const s = Math.sin(pm.walkCycle) * amp;
+    if (pm.rightArm) pm.rightArm.rotation.z = Math.PI - s;
+    if (pm.leftArm)  pm.leftArm.rotation.z  = -s;
+    if (pm.rightLeg) pm.rightLeg.rotation.z = -s;
+    if (pm.leftLeg)  pm.leftLeg.rotation.z  =  s;
+    if (pm.head)     pm.head.rotation.z     =  pitch;
+}
+
 function addRemotePlayer(id, username) {
     if (remotePlayers.has(id)) return;
-    const geo  = new THREE.CapsuleGeometry(0.35, 1.1, 4, 8);
-    const mat  = new THREE.MeshPhongMaterial({ color: 0x4488ff });
-    const mesh = new THREE.Mesh(geo, mat);
-    mesh.castShadow = true;
-    scene.add(mesh);
+
+    const model = playerModelTemplate ? _makePlayerModel() : null;
+    if (model) scene.add(model.scene);
 
     const labelEl = document.createElement('div');
     labelEl.style.cssText = 'position:fixed;font-family:monospace;font-size:12px;color:#fff;background:rgba(0,0,0,0.6);padding:2px 7px;border-radius:4px;transform:translateX(-50%);white-space:nowrap;pointer-events:none;';
@@ -4142,27 +4497,39 @@ function addRemotePlayer(id, username) {
     remoteLabelsEl.appendChild(labelEl);
 
     remotePlayers.set(id, {
-        mesh, labelEl,
+        model, labelEl,
         pos:       new THREE.Vector3(8, 184, 8),
         targetPos: new THREE.Vector3(8, 184, 8),
         yaw: 0,
+        pitch: 0,
     });
 }
 
 function removeRemotePlayer(id) {
     const rp = remotePlayers.get(id);
     if (!rp) return;
-    scene.remove(rp.mesh);
-    rp.mesh.geometry.dispose();
+    if (rp.model) {
+        scene.remove(rp.model.scene);
+        rp.model.scene.traverse(o => {
+            if (o.isMesh) { o.geometry.dispose(); if (o.material) o.material.dispose(); }
+        });
+    }
     rp.labelEl.remove();
     remotePlayers.delete(id);
 }
 
 function updateRemotePlayers(dt) {
     for (const rp of remotePlayers.values()) {
+        const prevX = rp.pos.x, prevZ = rp.pos.z;
         rp.pos.lerp(rp.targetPos, Math.min(dt * 15, 1));
-        rp.mesh.position.set(rp.pos.x, rp.pos.y + 0.9, rp.pos.z);
-        rp.mesh.rotation.y = rp.yaw;
+        const speed = Math.sqrt((rp.pos.x - prevX) ** 2 + (rp.pos.z - prevZ) ** 2) / dt;
+        rp.pitch = THREE.MathUtils.lerp(rp.pitch || 0, rp.targetPitch || 0, Math.min(dt * 15, 1));
+
+        if (rp.model) {
+            rp.model.scene.position.set(rp.pos.x, rp.pos.y, rp.pos.z);
+            rp.model.scene.rotation.y = rp.yaw + Math.PI / 2;
+            _animateModel(rp.model, speed, dt, rp.pitch);
+        }
 
         _rpScreen.set(rp.pos.x, rp.pos.y + 2.1, rp.pos.z);
         _rpScreen.project(camera);
@@ -4185,9 +4552,13 @@ net.onPlayerJoin = (id, username) => addRemotePlayer(id, username);
 
 net.onPlayerLeave = (id) => removeRemotePlayer(id);
 
-net.onPlayerMove = (id, pos, yaw) => {
+net.onPlayerMove = (id, pos, yaw, pitch) => {
     const rp = remotePlayers.get(id);
-    if (rp) { rp.targetPos.set(pos.x, pos.y, pos.z); rp.yaw = yaw; }
+    if (rp) {
+        rp.targetPos.set(pos.x, pos.y, pos.z);
+        rp.yaw = yaw;
+        rp.targetPitch = pitch;
+    }
 };
 
 net.onBlockChange = (x, y, z, v) => {
