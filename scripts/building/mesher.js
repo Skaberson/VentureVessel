@@ -1,4 +1,4 @@
-import { CHUNK, MAX_Y, MOLTENROCK, STONE, DEEPSTONE, LAVAROCK, DIM_MOON, DIM_FATES, MOONSTONE, VOIDSTONE, WOODPLANKS, WORKBENCH, WATER, LIGHT_LEVELS } from '../world/world.js';
+import { CHUNK, MAX_Y, MOLTENROCK, STONE, DEEPSTONE, LAVAROCK, DIM_MOON, DIM_FATES, MOONSTONE, VOIDSTONE, WOODPLANKS, WORKBENCH, WATER, LIGHT_LEVELS, IRON_ORE, LEAD_ORE } from '../world/world.js';
 import { MC_EDGE_TABLE, MC_TRI_TABLE } from './mc_tables.js';
 
 const KERNEL_CACHE = new Map();
@@ -25,7 +25,7 @@ const EA=[0,1,2,3,4,5,6,7,0,1,2,3], EB=[1,2,3,0,5,6,7,4,4,5,6,7];
 
 const MIN_BRIGHTNESS = 0.0;
 
-export function buildChunkMesh(world, cx, cy, cz, fullbright = false, lod = 1, voxelMode = false, useGaussian = true, supercomputer = false) {
+export function buildChunkMesh(world, cx, cy, cz, fullbright = false, lod = 1, voxelMode = false, useGaussian = true, supercomputer = false, xrayMode = false) {
     const x0 = cx*CHUNK, y0 = cy*CHUNK, z0 = cz*CHUNK;
     const x1 = x0+CHUNK+1;
     const y1 = Math.min(y0+CHUNK+1, MAX_Y+1);
@@ -40,9 +40,10 @@ export function buildChunkMesh(world, cx, cy, cz, fullbright = false, lod = 1, v
     const bsx=bx1-bx0+1, bsy=by1-by0+1, bsz=bz1-bz0+1;
     const size = bsx*bsy*bsz;
 
-    const solidBuf = new Uint8Array(size);
-    const typeBuf  = new Uint8Array(size);
-    const lightBuf = new Uint8Array(size);
+    const solidBuf     = new Uint8Array(size);
+    const typeBuf      = new Uint8Array(size);
+    const lightBuf     = new Uint8Array(size);
+    const colorLightBuf = new Uint8Array(size * 3);
 
     let hasSolid = false;
     for (let z=bz0;z<=bz1;z++)
@@ -51,9 +52,13 @@ export function buildChunkMesh(world, cx, cy, cz, fullbright = false, lod = 1, v
         const i = (x-bx0)+bsx*((y-by0)+bsy*(z-bz0));
         const t = world.get(x,y,z);
         if (t > 0) hasSolid = true;
-        solidBuf[i] = t > 0 ? 1 : 0;
+        solidBuf[i] = (t > 0 && (!xrayMode || t === IRON_ORE || t === LEAD_ORE)) ? 1 : 0;
         typeBuf[i]  = t;
         lightBuf[i] = world.getLight(x,y,z);
+        const [cr, cg, cb] = world.getColoredLight(x,y,z);
+        colorLightBuf[i*3]   = cr;
+        colorLightBuf[i*3+1] = cg;
+        colorLightBuf[i*3+2] = cb;
     }
 
     function solid(x,y,z) {
@@ -80,6 +85,12 @@ export function buildChunkMesh(world, cx, cy, cz, fullbright = false, lod = 1, v
         if (z+1<=bz1){const j=(x-bx0)+bsx*((y-by0)+bsy*(z+1-bz0));  if(!solidBuf[j]&&lightBuf[j]>best)best=lightBuf[j];}
         if (z-1>=bz0){const j=(x-bx0)+bsx*((y-by0)+bsy*(z-1-bz0));  if(!solidBuf[j]&&lightBuf[j]>best)best=lightBuf[j];}
         return best;
+    }
+
+    function getRawColoredLight(x, y, z, ch) {
+        if (y < by0 || y > by1 || x < bx0 || x > bx1 || z < bz0 || z > bz1) return 0;
+        const i = ((x-bx0)+bsx*((y-by0)+bsy*(z-bz0))) * 3 + ch;
+        return colorLightBuf[i];
     }
 
     // ── Density cache ─────────────────────────────────────────────────────────
@@ -145,6 +156,25 @@ export function buildChunkMesh(world, cx, cy, cz, fullbright = false, lod = 1, v
         
         const s = final / LIGHT_LEVELS;
         return Math.pow(MIN_BRIGHTNESS + s * (1.0 - MIN_BRIGHTNESS), 0.5);
+    }
+
+    function colorAt(wx, wy, wz) {
+        if (fullbright) return [1, 1, 1];
+        const sky = brightnessAt(wx, wy, wz);
+        const x0f = Math.floor(wx), x1f = x0f+1;
+        const y0f = Math.floor(wy), y1f = y0f+1;
+        const z0f = Math.floor(wz), z1f = z0f+1;
+        const tx = wx-x0f, ty = wy-y0f, tz = wz-z0f;
+        const out = [0, 0, 0];
+        for (let ch = 0; ch < 3; ch++) {
+            const v00 = getRawColoredLight(x0f,y0f,z0f,ch)*(1-tx)+getRawColoredLight(x1f,y0f,z0f,ch)*tx;
+            const v10 = getRawColoredLight(x0f,y1f,z0f,ch)*(1-tx)+getRawColoredLight(x1f,y1f,z0f,ch)*tx;
+            const v01 = getRawColoredLight(x0f,y0f,z1f,ch)*(1-tx)+getRawColoredLight(x1f,y0f,z1f,ch)*tx;
+            const v11 = getRawColoredLight(x0f,y1f,z1f,ch)*(1-tx)+getRawColoredLight(x1f,y1f,z1f,ch)*tx;
+            const vy0 = v00*(1-ty)+v10*ty, vy1 = v01*(1-ty)+v11*ty;
+            out[ch] = Math.min(1, sky + (vy0*(1-tz)+vy1*tz) / LIGHT_LEVELS);
+        }
+        return out;
     }
 
     // ── Marching Cubes ────────────────────────────────────────────────────────
@@ -267,8 +297,8 @@ export function buildChunkMesh(world, cx, cy, cz, fullbright = false, lod = 1, v
             }
 
             for (const v of [v0, v1, v2]) {
-                const br = brightnessAt(v[0], v[1], v[2]);
-                bkt.col.push(br, br, br);
+                const [cr, cg, cb] = colorAt(v[0], v[1], v[2]);
+                bkt.col.push(cr, cg, cb);
             }
         }
     }
@@ -308,8 +338,8 @@ export function buildChunkMesh(world, cx, cy, cz, fullbright = false, lod = 1, v
             bkt.pos.push(...v0,...v1,...v2, ...v0,...v2,...v3);
 
             for (const v of [v0,v1,v2,v0,v2,v3]) {
-                const br = brightnessAt(v[0], v[1], v[2]);
-                bkt.col.push(br, br, br);
+                const [cr, cg, cb] = colorAt(v[0], v[1], v[2]);
+                bkt.col.push(cr, cg, cb);
             }
 
             if (uv === 'xz') {
