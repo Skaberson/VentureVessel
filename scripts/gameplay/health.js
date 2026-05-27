@@ -38,30 +38,13 @@ const vignetteCanvas = document.createElement('canvas');
 vignetteCanvas.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:1500;opacity:0;';
 document.body.appendChild(vignetteCanvas);
 
-const deathScreen = document.createElement('div');
-deathScreen.style.cssText = 'position:fixed;inset:0;display:none;flex-direction:column;align-items:center;justify-content:center;gap:28px;z-index:3000;pointer-events:auto;';
-document.body.appendChild(deathScreen);
-
 const deathBlackout = document.createElement('div');
 deathBlackout.style.cssText = 'position:fixed;inset:0;background:black;opacity:0;z-index:2900;pointer-events:none;transition:none;';
 document.body.appendChild(deathBlackout);
 
-const deathTitle = document.createElement('div');
-deathTitle.textContent = 'END OF LIFE';
-deathTitle.style.cssText = 'color:#cc0000;font:bold 64px monospace;text-shadow:0 0 24px #ff0000,0 0 6px #ff0000;letter-spacing:8px;user-select:none;';
-deathScreen.appendChild(deathTitle);
-
-const rebirthBtn = document.createElement('button');
-rebirthBtn.textContent = 'REBIRTH';
-rebirthBtn.style.cssText = 'background:none;border:2px solid #cc0000;color:#cc0000;font:bold 28px monospace;letter-spacing:4px;padding:14px 40px;cursor:pointer;transition:background 0.15s,color 0.15s;';
-rebirthBtn.onmouseenter = () => { rebirthBtn.style.background = '#cc0000'; rebirthBtn.style.color = '#000'; };
-rebirthBtn.onmouseleave = () => { rebirthBtn.style.background = 'none';    rebirthBtn.style.color = '#cc0000'; };
-deathScreen.appendChild(rebirthBtn);
-
-rebirthBtn.addEventListener('click', () => {
+function performRebirth() {
     isDead = false;
     deathPhase = null;
-    deathScreen.style.display = 'none';
     deathBlackout.style.opacity = '0';
     vignetteOpacity = 0;
     vignetteCanvas.style.opacity = '0';
@@ -82,9 +65,7 @@ rebirthBtn.addEventListener('click', () => {
     _setIsFlying(false);
 
     _onRebirth?.();
-
-    document.body.requestPointerLock?.();
-});
+}
 
 window.addEventListener('resize', () => { if (vignetteOpacity > 0) _drawVignette(); });
 
@@ -242,6 +223,6 @@ export function updateDeathSequence(dt) {
         deathTimer += dt;
         const t = Math.min(deathTimer / 1.0, 1);
         deathBlackout.style.opacity = t.toFixed(4);
-        if (t >= 1) { deathPhase = 'screen'; deathScreen.style.display = 'flex'; }
+        if (t >= 1) { performRebirth(); }
     }
 }

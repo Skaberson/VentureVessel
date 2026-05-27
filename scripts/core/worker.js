@@ -6,6 +6,7 @@ const world = new VoxelWorld();
 let voxelMode   = false;
 let useGaussian = true;
 let supercomputerMode = false;
+let xrayMode = false;
 
 self.onmessage = function(e) {
     const { type, cx, cy, cz, lod, fullbright, x, y, z, v, sx, sz, inv, mx, mz, dim, enabled } = e.data;
@@ -16,6 +17,10 @@ self.onmessage = function(e) {
 
     if (type === 'setVoxelMode') {
         voxelMode = e.data.voxelMode;
+    }
+
+    if (type === 'setXray') {
+        xrayMode = e.data.xrayMode;
     }
 
     if (type === 'setGaussian') {
@@ -51,7 +56,7 @@ self.onmessage = function(e) {
             }
         }
 
-        const results = buildChunkMesh(world, cx, cy, cz, fullbright, lod || 1, voxelMode, useGaussian, supercomputerMode);
+        const results = buildChunkMesh(world, cx, cy, cz, fullbright, lod || 1, voxelMode, useGaussian, supercomputerMode, xrayMode);
 
         // Use Transferables to move the geometry data without copying it.
         const transferables = [];

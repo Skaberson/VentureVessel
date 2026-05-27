@@ -4,8 +4,8 @@ import {
     VoxelWorld, CHUNK, MIN_Y, MAX_Y, MIN_CY, MAX_CY, BIOME_FOREST, BIOME_DESERT, BIOME_TUNDRA, DIM_EARTH, DIM_MOON, DIM_WATER, DIM_FATES,
     SAND, PYRAMID_CHANCE, hash, bSeedX, bSeedZ, bOffset, mSeedX, mSeedZ,
     GRASS, DIRT, STONE, WOOD, LEAVES, SANDSTONE, CACTUS, ICE, PFROST, IGRASS, PINEWOOD, PINELEAVES, DEEPSTONE, LAVAROCK, MOLTENROCK, MOONSTONE,
-    WOODPLANKS, WORKBENCH, WOODCHIP, FLINT, WATER, STICK, WOODPICK, MOON_MOUNTAIN_ROCK,
-    VOIDGRASS, VOIDDIRT, VOIDSTONE,
+    WOODPLANKS, WORKBENCH, WOODCHIP, FLINT, WATER, STICK, WOODPICK, MOON_MOUNTAIN_ROCK, STONEPICK, IRON_ORE, LEAD_ORE,
+    VOIDGRASS, VOIDDIRT, VOIDSTONE, VOIDWOOD, VOIDLEAVES,
     syncBiomeParams, newRandomSeeds, findFatesSmoothSpawn
 } from '../world/world.js';
 import { listWorlds, saveWorld, loadWorld } from '../world/save.js';
@@ -17,8 +17,11 @@ import { initClouds, cloudLayerGroups, CLOUD_FIELD_R } from '../rendering/clouds
 import { initSpace, starSphere, earthSphere, cloudSphere, atmosphereSphere, moonSphere, moonAtmosSphere, atmosphereMat, moonAtmosMat } from '../rendering/space.js';
 import { initParticles, spawnParticles, updateParticles } from '../rendering/particles.js';
 import { initSlimes, slimes, CREATURE_BY_NAME, updateSlimes, tryPunchSlime, spawnCreatureAt } from '../entities/slimes.js';
+import { initWraithLeviathans, updateWraithLeviathans, spawnWraithLeviathan, setWraithIgnoreDay, wraithLeviathans } from '../entities/wraith_leviathans.js';
 import { initGravestones, gravestones, placeGravestone, updateGraveMining } from '../entities/gravestones.js';
 import { initHealth, getIsDead, getPlayerHealth, damagePlayer, updateHealth, updateVignette, updateDeathSequence, triggerDamageVignette } from '../gameplay/health.js';
+import { showDialogue, updateDialogue } from '../gameplay/dialogue.js';
+import { FATES_DIALOGUE, FATES_DIALOGUE_RETURN } from '../gameplay/fates_dialogue_lines.js';
 import { NetworkManager } from './network.js';
 import { WS_URL, HTTP_URL } from '../config.js';
 
@@ -32,7 +35,7 @@ let thirdPerson    = false;
 let scOpen         = false;
 
 // ── Renderer ──────────────────────────────────────────────────────────────────
-const renderer = new THREE.WebGLRenderer({ antialias: true });
+const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.shadowMap.enabled = true;
@@ -66,6 +69,8 @@ const BREAK_TIMES = {
     [PINEWOOD]:  3.0,
     [LEAVES]:    0,   // Instant
     [PINELEAVES]:0,   // Instant
+    [VOIDWOOD]:  4.0,
+    [VOIDLEAVES]:0,   // Instant
 };
 
 // Break-time overrides when the player holds a Wood Chip.
@@ -73,12 +78,20 @@ const BREAK_TIMES = {
 const WOODCHIP_BREAK_TIMES = {
     [WOOD]:     1.5,
     [PINEWOOD]: 1.5,
+    [VOIDWOOD]: 2.0,
     [DIRT]:     2.0,
 };
 
 const WOODPICK_BREAK_TIMES = {
     [STONE]: 2.0,
     [DIRT]:  1.0,
+};
+
+const STONEPICK_BREAK_TIMES = {
+    [STONE]:    1.5,
+    [DIRT]:     0.5,
+    [IRON_ORE]: 2.5,
+    [LEAD_ORE]: 3.0,
 };
 
 scene.background = currentSkyColor.clone();
@@ -320,8 +333,12 @@ const MATS = {
     26: new THREE.MeshLambertMaterial({ map: loadTex('assets/prototype/fates/voidgrass.png'),        vertexColors: true, transparent: true, fog: false }),
     27: new THREE.MeshLambertMaterial({ map: loadTex('assets/prototype/fates/voiddirt.png'),         vertexColors: true, transparent: true, fog: false }),
     28: new THREE.MeshLambertMaterial({ map: loadTex('assets/prototype/fates/voidstone.png'),        vertexColors: true, transparent: true, fog: false }),
+    29: new THREE.MeshLambertMaterial({ map: loadTex('assets/prototype/fates/voidwood.png'),         vertexColors: true, transparent: true, fog: false }),
+    30: new THREE.MeshLambertMaterial({ map: loadTex('assets/prototype/fates/voidleaves.png'),       vertexColors: true, transparent: true, fog: false, alphaTest: 0.05 }),
     18: new THREE.MeshLambertMaterial({ map: loadTex('assets/prototype/crafted/woodplanks.png'),    vertexColors: true, transparent: true, fog: false, side: THREE.DoubleSide }),
     22: new THREE.ShaderMaterial({ uniforms: waterUniforms, vertexShader: WATER_VERT, fragmentShader: WATER_FRAG, transparent: true, depthWrite: false, side: THREE.DoubleSide, fog: true }),
+    32: new THREE.MeshLambertMaterial({ map: loadTex('assets/prototype/underground/iron.png'),       vertexColors: true, transparent: true, fog: false }),
+    33: new THREE.MeshLambertMaterial({ map: loadTex('assets/prototype/underground/lead.png'),       vertexColors: true, transparent: true, fog: false }),
 };
 
 for (const [type, mat] of Object.entries(MATS)) {
@@ -709,9 +726,45 @@ new GLTFLoader().load('assets/models/woodenpick.glb', (gltf) => {
     updateCraftingIcons();
 
     const _heldPick = tpl.clone(true);
-    _heldPick.scale.multiplyScalar(1.4);
+    _heldPick.scale.multiplyScalar(2.1);
     _heldPick.position.y += 2; // shift model up so bottom aligns with group origin (pivot point)
     heldWoodpickGroup.add(_heldPick);
+});
+
+// ── Stone Pickaxe GLB ─────────────────────────────────────────────────────────
+const heldStonepickGroup = new THREE.Group();
+heldStonepickGroup.rotation.order = 'YXZ';
+heldStonepickGroup.rotation.x = -0.3;
+heldStonepickGroup.rotation.y = 0.351;
+heldStonepickGroup.visible = false;
+hudScene.add(heldStonepickGroup);
+
+new GLTFLoader().load('assets/models/stonepick.glb', (gltf) => {
+    const tpl = gltf.scene;
+    const _b = new THREE.Box3().setFromObject(tpl);
+    const _sz = new THREE.Vector3(); _b.getSize(_sz);
+    const _sc = 1.0 / Math.max(_sz.x, _sz.y, _sz.z);
+    const _c  = new THREE.Vector3(); _b.getCenter(_c);
+    tpl.scale.setScalar(_sc);
+    tpl.position.sub(_c.multiplyScalar(_sc));
+
+    const _iScene = new THREE.Scene();
+    _iScene.add(new THREE.AmbientLight(0xffffff, 0.8));
+    const _iSun = new THREE.DirectionalLight(0xffffff, 1.0); _iSun.position.set(2, 3, 2); _iScene.add(_iSun);
+    const _iCam = new THREE.PerspectiveCamera(35, 1, 0.1, 100);
+    _iCam.position.set(1.8, 1.8, 1.8); _iCam.lookAt(0, 0, 0);
+    _iScene.add(tpl.clone(true));
+    const _iCanvas = document.createElement('canvas'); _iCanvas.width = 64; _iCanvas.height = 64;
+    const _iRenderer = new THREE.WebGLRenderer({ canvas: _iCanvas, alpha: true });
+    _iRenderer.setSize(64, 64); _iRenderer.render(_iScene, _iCam);
+    ISO_PREVIEWS[STONEPICK] = _iCanvas.toDataURL();
+    _iRenderer.dispose();
+    updateCraftingIcons();
+
+    const _heldStonePick = tpl.clone(true);
+    _heldStonePick.scale.multiplyScalar(2.1);
+    _heldStonePick.position.y += 2;
+    heldStonepickGroup.add(_heldStonePick);
 });
 
 let lastHeldType = -1;
@@ -732,6 +785,7 @@ const world  = new VoxelWorld();
 const input  = new Input();
 const player = new Player(world);
 scene.add(player.mesh);
+
 
 const CLOUD_Y = 270;
 initClouds(scene, gameTextures);
@@ -835,6 +889,52 @@ document.body.appendChild(hotbar);
 const fadeOverlay = document.createElement('div');
 fadeOverlay.style.cssText = 'position:fixed; top:0; left:0; width:100vw; height:100vh; background:black; opacity:0; pointer-events:none; transition:opacity 1s; z-index:2000;';
 document.body.appendChild(fadeOverlay);
+
+// ── Pixelation effect ─────────────────────────────────────────────────────────
+const _pxCanvas = document.createElement('canvas');
+_pxCanvas.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:1999;display:none;image-rendering:pixelated;';
+document.body.appendChild(_pxCanvas);
+const _pxCtx  = _pxCanvas.getContext('2d');
+const _pxTemp = document.createElement('canvas');
+const _pxTempCtx = _pxTemp.getContext('2d');
+let _pxFrom = 1, _pxTo = 1, _pxT = 0, _pxDur = 0, _pxCb = null, _pxActive = false;
+
+function startPixelAnim(from, to, durationMs, onComplete) {
+    _pxFrom = from; _pxTo = to; _pxT = 0;
+    _pxDur = durationMs / 1000;
+    _pxCb = onComplete ?? null;
+    _pxActive = true;
+    _pxCanvas.style.display = '';
+}
+
+function pixelTransition(body) {
+    isTransitioning = true;
+    startPixelAnim(1, 64, 700, () => {
+        body();
+        startPixelAnim(64, 1, 800, () => { isTransitioning = false; });
+    });
+}
+
+function updatePixelEffect(dt) {
+    if (!_pxActive) return;
+    _pxT = Math.min(_pxT + dt, _pxDur);
+    const p = _pxDur > 0 ? _pxT / _pxDur : 1;
+    const e = p < 0.5 ? 2*p*p : -1 + (4 - 2*p)*p; // ease-in-out quad
+    const size = Math.max(1, Math.round(_pxFrom + (_pxTo - _pxFrom) * e));
+    const W = renderer.domElement.width, H = renderer.domElement.height;
+    _pxCanvas.width = W; _pxCanvas.height = H;
+    const bw = Math.max(1, Math.ceil(W / size)), bh = Math.max(1, Math.ceil(H / size));
+    _pxTemp.width = bw; _pxTemp.height = bh;
+    _pxTempCtx.imageSmoothingEnabled = false;
+    _pxTempCtx.drawImage(renderer.domElement, 0, 0, bw, bh);
+    _pxCtx.imageSmoothingEnabled = false;
+    _pxCtx.drawImage(_pxTemp, 0, 0, W, H);
+    if (_pxT >= _pxDur) {
+        _pxActive = false;
+        if (_pxTo <= 1) _pxCanvas.style.display = 'none';
+        if (_pxCb) { const cb = _pxCb; _pxCb = null; cb(); }
+    }
+}
 
 const slots = [];
 for (let i = 0; i < 9; i++) {
@@ -1110,11 +1210,12 @@ const ITEM_NAMES = {
     6:'Sand', 7:'Sandstone', 8:'Cactus', 9:'Ice', 10:'Packed Frost',
     11:'Icy Grass', 12:'Pine Wood', 13:'Ice Leaves', 14:'Deepstone',
     15:'Lava Rock', 18:'Wooden Planks', 19:'Workbench', 20:'Wood Chip', 21:'Flint',
-    23:'Stick', 24:'Wooden Pickaxe', 25:'Mountain Moon Rock'
+    23:'Stick', 24:'Wooden Pickaxe', 25:'Mountain Moon Rock', 31:'Stone Pickaxe',
+    32:'Iron Ore', 33:'Lead Ore'
 };
 
 // Non-placeable item types (tools, etc.) — right-click will not try to place these.
-const TOOL_TYPES = new Set([WOODCHIP, FLINT, STICK, WOODPICK]);
+const TOOL_TYPES = new Set([WOODCHIP, FLINT, STICK, WOODPICK, STONEPICK]);
 
 const RECIPES = [
     {
@@ -1139,6 +1240,10 @@ const WORKBENCH_RECIPES = [
     {
         result:      { type: WOODPICK, count: 1 },
         ingredients: [{ type: STICK, count: 2 }, { type: WOODPLANKS, count: 10 }]
+    },
+    {
+        result:      { type: STONEPICK, count: 1 },
+        ingredients: [{ type: STONE, count: 10 }, { type: STICK, count: 3 }, { type: FLINT, count: 2 }]
     }
 ];
 
@@ -1887,6 +1992,11 @@ function applyMeshResults(cx, cy, cz, lod, results) {
         scene.add(m);
         meshes.push(m);
     }
+    if (xrayMode) {
+        for (const m of meshes) {
+            m.visible = m.material === MATS[IRON_ORE] || m.material === MATS[LEAD_ORE];
+        }
+    }
     loadedChunks.set(key, { meshes, lod });
     markLodMaskDirty();
 }
@@ -1899,7 +2009,7 @@ function rebuildChunk(cx, cy, cz, lod = 1) {
         for (let dy = -1; dy <= 1; dy++)
         for (let dx = -1; dx <= 1; dx++)
             world.get((cx + dx) * CHUNK, (cy + dy) * CHUNK, (cz + dz) * CHUNK);
-        const results = buildChunkMesh(world, cx, cy, cz, fullbright, lod, voxelMode, useGaussian, supercomputerMode);
+        const results = buildChunkMesh(world, cx, cy, cz, fullbright, lod, voxelMode, useGaussian, supercomputerMode, xrayMode);
         applyMeshResults(cx, cy, cz, lod, results);
         pendingChunks.delete(key);
     } else {
@@ -2543,10 +2653,44 @@ let instamineMode  = false;
 const cosmologyAudio = new Audio('assets/music/Cosmology.m4a');
 cosmologyAudio.loop = true;
 cosmologyAudio.volume = 0;
+
+// ── Fates Dialogue Music ──────────────────────────────────────────────────────
+const fatedAudio = new Audio('assets/music/Fated.mp3');
+fatedAudio.loop = true;
+fatedAudio.volume = 0;
+let _fatedFadeInterval = null;
+
+function playFatedMusic() {
+    clearInterval(_fatedFadeInterval);
+    fatedAudio.currentTime = 0;
+    fatedAudio.volume = 0;
+    fatedAudio.play().catch(() => {});
+    let v = 0;
+    _fatedFadeInterval = setInterval(() => {
+        v = Math.min(v + 0.02, 1);
+        fatedAudio.volume = v;
+        if (v >= 1) clearInterval(_fatedFadeInterval);
+    }, 50);
+}
+
+function stopFatedMusic() {
+    clearInterval(_fatedFadeInterval);
+    let v = fatedAudio.volume;
+    _fatedFadeInterval = setInterval(() => {
+        v = Math.max(v - 0.02, 0);
+        fatedAudio.volume = v;
+        if (v <= 0) { clearInterval(_fatedFadeInterval); fatedAudio.pause(); }
+    }, 50);
+}
 let cosmologyPlaying = false;
 let fullbright = false;
 let voxelMode = false;
+let xrayMode = false;
 let isTransitioning = false;
+let fatesFirstEntry = true;
+let fatesVisitCount = 0;
+let fatesNoTimer = false;
+let fatesCountdownEl = null;
 
 // ── Main menu ─────────────────────────────────────────────────────────────────
 const mainMenuEl = document.createElement('div');
@@ -3113,6 +3257,42 @@ function setTerrainFog(enabled) {
     }
 }
 
+const fatesIntroOverlay = document.createElement('div');
+fatesIntroOverlay.style.cssText = 'position:fixed;inset:0;z-index:4500;background:black url("assets/prototype/fates/bg.gif") center/cover no-repeat;opacity:0;pointer-events:none;transition:opacity 1s;';
+document.body.appendChild(fatesIntroOverlay);
+
+const fatesRedOverlay = document.createElement('div');
+fatesRedOverlay.style.cssText = 'position:absolute;inset:0;background:url("assets/prototype/fates/bg_red.gif") center/cover no-repeat;opacity:0;transition:opacity 1s;pointer-events:none;';
+fatesIntroOverlay.appendChild(fatesRedOverlay);
+
+const fatesWhiteOverlay = document.createElement('div');
+fatesWhiteOverlay.style.cssText = 'position:absolute;inset:0;background:url("assets/prototype/fates/bg_white.gif") center/cover no-repeat;opacity:0;transition:opacity 1s;pointer-events:none;';
+fatesIntroOverlay.appendChild(fatesWhiteOverlay);
+
+function startFatesIntro(onDone, dialogueData = FATES_DIALOGUE) {
+    // Remove transition so the overlay appears in the same paint frame the death
+    // blackout clears — no gap between them.
+    fatesIntroOverlay.style.transition = 'none';
+    fatesIntroOverlay.style.opacity = '1';
+    fatesIntroOverlay.style.pointerEvents = 'auto';
+    fatesRedOverlay.style.opacity = '0';
+    // Re-enable transition after the instant snap so the fade-out is still smooth.
+    requestAnimationFrame(() => { fatesIntroOverlay.style.transition = 'opacity 1s'; });
+    playFatedMusic();
+    showDialogue(dialogueData, () => {
+        fatesIntroOverlay.style.opacity = '0';
+        fatesIntroOverlay.style.pointerEvents = 'none';
+        stopFatedMusic();
+        setTimeout(onDone, 1000);
+    }, {
+        shake: (amount) => { shake.amount = amount; shake.time = 0; },
+        bg: (name) => {
+            fatesRedOverlay.style.opacity   = name === 'red'   ? '1' : '0';
+            fatesWhiteOverlay.style.opacity = name === 'white' ? '1' : '0';
+        },
+    });
+}
+
 function startFatesTransition() {
     isTransitioning = true;
     fadeOverlay.style.opacity = '1';
@@ -3169,11 +3349,10 @@ function respawnFromFates() {
     player.vel.set(0, 0, 0);
     isFlying = false;
 
-    fadeOverlay.style.opacity = '0';
-    setTimeout(() => {
+    startPixelAnim(64, 1, 800, () => {
         isTransitioning = false;
         document.body.requestPointerLock?.();
-    }, 1000);
+    });
 }
 
 function startFatesCountdown() {
@@ -3181,6 +3360,7 @@ function startFatesCountdown() {
     let elapsed = 0;
 
     const el = document.createElement('div');
+    fatesCountdownEl = el;
     el.textContent = '20';
     Object.assign(el.style, {
         position: 'fixed',
@@ -3202,21 +3382,23 @@ function startFatesCountdown() {
     document.body.appendChild(el);
 
     requestAnimationFrame(() => requestAnimationFrame(() => {
-        el.style.opacity = '1';
+        if (!fatesNoTimer) el.style.opacity = '1';
     }));
 
     const interval = setInterval(() => {
+        if (fatesNoTimer) return;
+
         elapsed++;
         count--;
 
         if (count <= 0) {
             clearInterval(interval);
             el.textContent = '0';
-            fadeOverlay.style.opacity = '1';
-            setTimeout(() => {
+            startPixelAnim(1, 64, 700, () => {
                 el.remove();
+                fatesCountdownEl = null;
                 respawnFromFates();
-            }, 1000);
+            });
             return;
         }
 
@@ -3248,6 +3430,7 @@ const BLOCK_BY_NAME = Object.fromEntries(
 );
 
 const CMD_REGISTRY = [
+    { cmd: '/ram',        display: '/ram' },
     { cmd: '/collect',    display: '/collect' },
     { cmd: '/dynamite',   display: '/dynamite' },
     { cmd: '/instamine',  display: '/instamine' },
@@ -3259,11 +3442,13 @@ const CMD_REGISTRY = [
     { cmd: '/inception',  display: '/inception' },
     { cmd: '/ptp',        display: '/ptp' },
     { cmd: '/kill',       display: '/kill' },
+    { cmd: '/notimer',    display: '/notimer' },
     { cmd: '/re',         display: '/re' },
     { cmd: '/sc',         display: '/sc' },
     { cmd: '/tpr',        display: '/tpr' },
     { cmd: '/tskip',      display: '/tskip' },
     { cmd: '/vox',        display: '/vox' },
+    { cmd: '/xray',       display: '/xray' },
     { cmd: '/give',       display: '/give <block> <count>',  multi: true },
     { cmd: '/spawn',      display: '/spawn <creature>',      multi: true },
     { cmd: '/speed',      display: '/speed <multiplier>',    multi: true },
@@ -3402,7 +3587,23 @@ cmdInput.addEventListener('keydown', e => {
         cmdInput.value = '';
         cmdInput.blur();
         
-        if (cmd === '/collect') {
+        if (cmd === '/ram') {
+            const info = renderer.info;
+            const lines = [
+                `chunks: ${loadedChunks.size}  build queue: ${buildQueue.length}  pending: ${pendingChunks.size}`,
+                `entities: ${slimes.length} slimes  ${wraithLeviathans.length} wraiths  ${gravestones.length} gravestones`,
+                `drops: ${drops.length}`,
+                `draw calls: ${info.render.calls}  triangles: ${(info.render.triangles / 1000).toFixed(1)}k`,
+                `geometries: ${info.memory.geometries}  textures: ${info.memory.textures}`,
+            ];
+            const prev = cmdFeedback.textContent;
+            cmdFeedback.innerHTML = lines.join('<br>');
+            cmdFeedback.style.opacity = '1';
+            setTimeout(() => {
+                cmdFeedback.style.opacity = '0';
+                setTimeout(() => { cmdFeedback.textContent = ''; }, 300);
+            }, 5000);
+        } else if (cmd === '/collect') {
             const count = drops.length;
             for (let i = drops.length - 1; i >= 0; i--) {
                 addToInventory(drops[i].type);
@@ -3438,39 +3639,75 @@ cmdInput.addEventListener('keydown', e => {
                 if (world.dimension === DIM_EARTH) {
                     showFeedback('already on earth');
                 } else {
-                    // Reuse /re logic: instant switch + respawn at spawn
-                    world.dimension = DIM_EARTH;
-                    broadcastWorkers({ type: 'setDimension', dim: DIM_EARTH });
-                    curveUniforms.uPlanetRadius.value = EARTH_PLANET_RADIUS;
-                    ultimateUniforms.uIsMoon.value = 0.0;
-                    ultimateUniforms.uIsFates.value = 0.0;
-                    setTerrainFog(false);
-                    for (const entry of loadedChunks.values()) {
-                        for (const m of entry.meshes) { scene.remove(m); m.geometry.dispose(); }
-                    }
-                    loadedChunks.clear();
-                    markLodMaskDirty();
-                    buildQueue.length = 0;
-                    pendingChunks.clear();
-                    pendingMiningChunks.clear();
-                    player.pos.set(8, 184, 8);
-                    player.vel.set(0, 0, 0);
-                    isFlying = false;
-                    showFeedback('warped to earth');
+                    showFeedback('warping to earth...');
+                    pixelTransition(() => {
+                        world.dimension = DIM_EARTH;
+                        broadcastWorkers({ type: 'setDimension', dim: DIM_EARTH });
+                        curveUniforms.uPlanetRadius.value = EARTH_PLANET_RADIUS;
+                        ultimateUniforms.uIsMoon.value = 0.0;
+                        ultimateUniforms.uIsFates.value = 0.0;
+                        setTerrainFog(false);
+                        for (const entry of loadedChunks.values()) {
+                            for (const m of entry.meshes) { scene.remove(m); m.geometry.dispose(); }
+                        }
+                        loadedChunks.clear();
+                        markLodMaskDirty();
+                        buildQueue.length = 0;
+                        pendingChunks.clear();
+                        pendingMiningChunks.clear();
+                        player.pos.set(8, 184, 8);
+                        player.vel.set(0, 0, 0);
+                        isFlying = false;
+                    });
                 }
             } else if (dim === 'moon') {
                 if (world.dimension === DIM_MOON) {
                     showFeedback('already on moon');
                 } else {
-                    startMoonTransition();
                     showFeedback('warping to moon...');
+                    pixelTransition(() => {
+                        world.dimension = DIM_MOON;
+                        broadcastWorkers({ type: 'setDimension', dim: DIM_MOON });
+                        curveUniforms.uPlanetRadius.value = MOON_PLANET_RADIUS;
+                        ultimateUniforms.uIsMoon.value = 1.0;
+                        ultimateUniforms.uIsFates.value = 0.0;
+                        setTerrainFog(false);
+                        for (const entry of loadedChunks.values()) {
+                            for (const m of entry.meshes) { scene.remove(m); m.geometry.dispose(); }
+                        }
+                        loadedChunks.clear();
+                        markLodMaskDirty();
+                        buildQueue.length = 0;
+                        pendingChunks.clear();
+                        pendingMiningChunks.clear();
+                        const tx = 8, tz = 8;
+                        player.pos.set(tx, world.surfaceAt(tx, tz) + 50, tz);
+                        player.vel.set(0, -5, 0);
+                    });
                 }
             } else if (dim === 'water') {
                 if (world.dimension === DIM_WATER) {
                     showFeedback('already in water dimension');
                 } else {
-                    startWaterTransition();
-                    showFeedback('warping to water dimension...');
+                    showFeedback('warping to water...');
+                    pixelTransition(() => {
+                        world.dimension = DIM_WATER;
+                        broadcastWorkers({ type: 'setDimension', dim: DIM_WATER });
+                        curveUniforms.uPlanetRadius.value = EARTH_PLANET_RADIUS;
+                        ultimateUniforms.uIsMoon.value = 0.0;
+                        ultimateUniforms.uIsFates.value = 0.0;
+                        setTerrainFog(false);
+                        for (const entry of loadedChunks.values()) {
+                            for (const m of entry.meshes) { scene.remove(m); m.geometry.dispose(); }
+                        }
+                        loadedChunks.clear();
+                        markLodMaskDirty();
+                        buildQueue.length = 0;
+                        pendingChunks.clear();
+                        pendingMiningChunks.clear();
+                        player.pos.set(8, 32, 8);
+                        player.vel.set(0, -5, 0);
+                    });
                 }
             } else {
                 showFeedback('unknown dimension — try: earth, moon, water');
@@ -3484,6 +3721,10 @@ cmdInput.addEventListener('keydown', e => {
                     showFeedback('teleporting to water dimension...');
                 }
             }
+        } else if (cmd === '/notimer') {
+            fatesNoTimer = !fatesNoTimer;
+            if (fatesCountdownEl) fatesCountdownEl.style.opacity = fatesNoTimer ? '0' : '1';
+            showFeedback(fatesNoTimer ? 'fates timer disabled' : 'fates timer enabled');
         } else if (cmd === '/kill') {
             damagePlayer(getPlayerHealth());
         } else if (cmd === '/re') {
@@ -3518,6 +3759,10 @@ cmdInput.addEventListener('keydown', e => {
             if (!flyMode) isFlying = false;
             updateFlyBtn();
             showFeedback(`fly mode ${flyMode ? 'on' : 'off'}`);
+        } else if (cmd === '/allday') {
+            window._wraithIgnoreDay = !window._wraithIgnoreDay;
+            setWraithIgnoreDay(!!window._wraithIgnoreDay);
+            showFeedback(`wraith day despawn ${window._wraithIgnoreDay ? 'disabled' : 'enabled'}`);
         } else if (cmd === '/fullbright') {
             fullbright = !fullbright;
             showFeedback(`fullbright ${fullbright ? 'on' : 'off'}`);
@@ -3536,6 +3781,15 @@ cmdInput.addEventListener('keydown', e => {
                 const entry = loadedChunks.get(key);
                 rebuildChunk(cx, cy, cz, entry ? entry.lod : 1);
             }
+        } else if (cmd === '/xray') {
+            xrayMode = !xrayMode;
+            broadcastWorkers({ type: 'setXray', xrayMode });
+            for (const key of Array.from(loadedChunks.keys())) {
+                const [cx, cy, cz] = key.split(',').map(Number);
+                const entry = loadedChunks.get(key);
+                rebuildChunk(cx, cy, cz, entry ? entry.lod : 1);
+            }
+            showFeedback(`xray ${xrayMode ? 'on' : 'off'}`);
         } else if (cmd === '/tpr') {
             const currentBiome = world.getBiomeAt(player.pos.x, player.pos.z);
             let targetX, targetZ, targetY;
@@ -3635,6 +3889,9 @@ cmdInput.addEventListener('keydown', e => {
             const name = cmd.slice(7).trim();
             if (!CREATURE_BY_NAME[name]) {
                 showFeedback(`unknown creature: ${name} — try: ${Object.keys(CREATURE_BY_NAME).join(', ')}`);
+            } else if (name === 'wraith') {
+                if (spawnWraithLeviathan()) showFeedback('spawned wraith');
+                else showFeedback('wraith model not loaded yet');
             } else {
                 spawnCreatureAt(name, player.pos.x, player.pos.y, player.pos.z);
                 showFeedback(`spawned ${name}`);
@@ -3730,7 +3987,7 @@ function rebuildChunkMining(cx, cy, cz, lod = 1) {
         for (let dy = -1; dy <= 1; dy++)
         for (let dx = -1; dx <= 1; dx++)
             world.get((cx + dx) * CHUNK, (cy + dy) * CHUNK, (cz + dz) * CHUNK);
-        const results = buildChunkMesh(world, cx, cy, cz, fullbright, lod, voxelMode, useGaussian, supercomputerMode);
+        const results = buildChunkMesh(world, cx, cy, cz, fullbright, lod, voxelMode, useGaussian, supercomputerMode, xrayMode);
         applyMeshResults(cx, cy, cz, lod, results);
         pendingMiningChunks.delete(key);
     } else {
@@ -3750,6 +4007,10 @@ function updateAffectedChunks(x, y, z) {
 // ── Slime System ─────────────────────────────────────────────────────────────
 initSlimes(scene, world, player, camera, showFeedback, applyPlanetCurve, curveDepthMat);
 
+// ── Wraith Leviathan System ───────────────────────────────────────────────────
+initWraithLeviathans(scene, world, player, camera, applyPlanetCurve, curveDepthMat);
+CREATURE_BY_NAME['wraith'] = true;
+
 // ── Gravestone System ─────────────────────────────────────────────────────────
 initGravestones(scene, world, input, spawnDrop, shake);
 
@@ -3766,7 +4027,17 @@ initHealth({
     setSelectedSlot: (v) => { selectedSlot = v; },
     updateInventoryUI,
     shake,
-    onRebirth: startFatesTransition,
+    onRebirth: () => {
+        fatesVisitCount++;
+        if (fatesFirstEntry) {
+            fatesFirstEntry = false;
+            startFatesIntro(() => startFatesTransition());
+        } else if (fatesVisitCount === 2) {
+            startFatesIntro(() => startFatesTransition(), FATES_DIALOGUE_RETURN);
+        } else {
+            startFatesTransition();
+        }
+    },
 });
 
 // ── Gameplay ──────────────────────────────────────────────────────────────────
@@ -3776,6 +4047,8 @@ function animate() {
     const now = performance.now();
     const dt  = Math.min((now - last) / 1000, 0.05);
     last = now;
+
+    updatePixelEffect(dt);
 
     input.update();
 
@@ -3811,9 +4084,11 @@ function animate() {
     updateParticles(dt);
     updateDrops(dt);
     updateSlimes(dt);
+    updateWraithLeviathans(dt, dayIntensity);
     updateHealth(dt);
     updateVignette(dt);
     updateDeathSequence(dt);
+    updateDialogue(dt);
 
     // ── Atmosphere & Space Transitions ────────────────────────────────────────
     // We move this above the early return so the sky/terrain updates even if input isn't locked
@@ -4237,10 +4512,13 @@ function animate() {
 
         const blockType = world.get(hit.x, hit.y, hit.z);
         const heldItem = inventory[selectedSlot];
-        const hasChip  = heldItem?.type === WOODCHIP  && (heldItem?.count ?? 0) > 0;
-        const hasPick  = heldItem?.type === WOODPICK  && (heldItem?.count ?? 0) > 0;
+        const hasChip       = heldItem?.type === WOODCHIP   && (heldItem?.count ?? 0) > 0;
+        const hasPick       = heldItem?.type === WOODPICK   && (heldItem?.count ?? 0) > 0;
+        const hasStonePick  = heldItem?.type === STONEPICK  && (heldItem?.count ?? 0) > 0;
         const breakTime = hasChip && WOODCHIP_BREAK_TIMES[blockType] !== undefined
             ? WOODCHIP_BREAK_TIMES[blockType]
+            : hasStonePick && STONEPICK_BREAK_TIMES[blockType] !== undefined
+            ? STONEPICK_BREAK_TIMES[blockType]
             : hasPick && WOODPICK_BREAK_TIMES[blockType] !== undefined
             ? WOODPICK_BREAK_TIMES[blockType]
             : (BREAK_TIMES[blockType] ?? Infinity);
@@ -4251,7 +4529,7 @@ function animate() {
                 miningProgress = 0;
             } else {
                 isBreaking = true;
-                if (hasPick) pickaxeBreaking = true;
+                if (hasPick || hasStonePick) pickaxeBreaking = true;
                 if (breakTime === 0 || dynamiteMode || instamineMode) {
                     performBreak(hit);
                 } else {
@@ -4311,15 +4589,17 @@ function animate() {
             const newIsWoodchip  = newType === WOODCHIP;
             const newIsFlint     = newType === FLINT;
             const newIsStick     = newType === STICK;
-            const newIsWoodpick  = newType === WOODPICK;
-            const newIsGlb = newIsWorkbench || newIsWoodchip || newIsFlint || newIsStick || newIsWoodpick;
+            const newIsWoodpick   = newType === WOODPICK;
+            const newIsStonepick  = newType === STONEPICK;
+            const newIsGlb = newIsWorkbench || newIsWoodchip || newIsFlint || newIsStick || newIsWoodpick || newIsStonepick;
             heldMesh.material = getHudMat(newType > 0 ? newType : 1);
             heldMesh.visible = newHasItem && !newIsGlb;
-            heldWorkbenchGroup.visible = newHasItem && newIsWorkbench;
-            heldWoodchipGroup.visible  = newHasItem && newIsWoodchip;
-            heldFlintGroup.visible     = newHasItem && newIsFlint;
-            heldStickGroup.visible     = newHasItem && newIsStick;
-            heldWoodpickGroup.visible  = newHasItem && newIsWoodpick;
+            heldWorkbenchGroup.visible  = newHasItem && newIsWorkbench;
+            heldWoodchipGroup.visible   = newHasItem && newIsWoodchip;
+            heldFlintGroup.visible      = newHasItem && newIsFlint;
+            heldStickGroup.visible      = newHasItem && newIsStick;
+            heldWoodpickGroup.visible   = newHasItem && newIsWoodpick;
+            heldStonepickGroup.visible  = newHasItem && newIsStonepick;
             lastHeldType = newType;
             slotSwapY = -1.6;
             slotSwapState = 'enter';
@@ -4344,18 +4624,20 @@ function animate() {
             const isWoodchip  = polledType === WOODCHIP;
             const isFlint     = polledType === FLINT;
             const isStick     = polledType === STICK;
-            const isWoodpick  = polledType === WOODPICK;
-            const isGlb = isWorkbench || isWoodchip || isFlint || isStick || isWoodpick;
+            const isWoodpick   = polledType === WOODPICK;
+            const isStonepick  = polledType === STONEPICK;
+            const isGlb = isWorkbench || isWoodchip || isFlint || isStick || isWoodpick || isStonepick;
             if (polledType !== lastHeldType) {
                 heldMesh.material = getHudMat(polledType > 0 ? polledType : 1);
                 lastHeldType = polledType;
             }
             heldMesh.visible = hasItem && !isGlb;
-            heldWorkbenchGroup.visible = hasItem && isWorkbench;
-            heldWoodchipGroup.visible  = hasItem && isWoodchip;
-            heldFlintGroup.visible     = hasItem && isFlint;
-            heldStickGroup.visible     = hasItem && isStick;
-            heldWoodpickGroup.visible  = hasItem && isWoodpick;
+            heldWorkbenchGroup.visible  = hasItem && isWorkbench;
+            heldWoodchipGroup.visible   = hasItem && isWoodchip;
+            heldFlintGroup.visible      = hasItem && isFlint;
+            heldStickGroup.visible      = hasItem && isStick;
+            heldWoodpickGroup.visible   = hasItem && isWoodpick;
+            heldStonepickGroup.visible  = hasItem && isStonepick;
         }
     }
 
@@ -4369,10 +4651,11 @@ function animate() {
 
     // Rotate around the bottom pivot: sweep forward on each strike
     const _pickAngle = Math.abs(Math.sin(pickaxeSwingTime * Math.PI * 2.8)) * (Math.PI * 0.36);
-    heldWoodpickGroup.rotation.x = -0.3 - _pickAngle;
+    heldWoodpickGroup.rotation.x  = -0.3 - _pickAngle;
+    heldStonepickGroup.rotation.x = -0.3 - _pickAngle;
 
     // Every frame: swap hand models based on breaking state; reset flag for next frame
-    const handHasItem = heldMesh.visible || heldWorkbenchGroup.visible || heldWoodchipGroup.visible || heldFlintGroup.visible || heldStickGroup.visible || heldWoodpickGroup.visible;
+    const handHasItem = heldMesh.visible || heldWorkbenchGroup.visible || heldWoodchipGroup.visible || heldFlintGroup.visible || heldStickGroup.visible || heldWoodpickGroup.visible || heldStonepickGroup.visible;
     handGroup.visible = !handHasItem && !isBreaking;
     handBreakGroup.visible = !handHasItem && isBreaking;
     isBreaking = false;
@@ -4408,7 +4691,8 @@ function animate() {
     heldWoodchipGroup.position.set(hudPosX, hudPosY, hudPosZ);
     heldFlintGroup.position.set(hudPosX, hudPosY, hudPosZ);
     heldStickGroup.position.set(hudPosX, hudPosY, hudPosZ);
-    heldWoodpickGroup.position.set(hudPosX, hudPosY - 1.3, hudPosZ + 1.0);
+    heldWoodpickGroup.position.set(hudPosX, hudPosY - 2.2, hudPosZ + 1.0);
+    heldStonepickGroup.position.set(hudPosX, hudPosY - 2.2, hudPosZ + 1.0);
     handGroup.position.set(hudPosX, hudPosY, hudPosZ);
     handBreakGroup.position.set(hudPosX, hudPosY, hudPosZ);
 

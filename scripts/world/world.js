@@ -30,9 +30,14 @@ export const WATER      = 22;
 export const STICK      = 23;
 export const WOODPICK   = 24;
 export const MOON_MOUNTAIN_ROCK = 25;
-export const VOIDGRASS = 26;
-export const VOIDDIRT  = 27;
-export const VOIDSTONE = 28;
+export const VOIDGRASS   = 26;
+export const VOIDDIRT    = 27;
+export const VOIDSTONE   = 28;
+export const VOIDWOOD    = 29;
+export const VOIDLEAVES  = 30;
+export const STONEPICK   = 31;
+export const IRON_ORE   = 32;
+export const LEAD_ORE   = 33;
 
 export const DIM_EARTH  = 0;
 export const DIM_MOON   = 1;
@@ -182,6 +187,9 @@ function surfaceY(wx, wz) {
 function stoneNoise(x, y, z) {
     return valueNoise(x/18, y/18, z/18)*0.65 + valueNoise(x/7, y/7, z/7)*0.35;
 }
+function oreNoise(x, y, z) {
+    return valueNoise(x/15, y/15, z/15)*0.6 + valueNoise(x/6, y/6, z/6)*0.4;
+}
 function isCave(x, y, z, surf) {
     // Disable caves in the Lava Layer to allow custom rock formations
     if (y < -100) return false;
@@ -204,10 +212,11 @@ const LDIRS = [1,0,0, -1,0,0, 0,1,0, 0,-1,0, 0,0,1, 0,0,-1];
 
 export class VoxelWorld {
     constructor() {
-        this.dimension  = DIM_EARTH;
-        this.chunks     = new Map(); // "cx,cy,cz" -> Uint8Array (types)
-        this.lights     = new Map(); // "cx,cy,cz" -> Uint8Array (sky light 0-15)
-        this.litCols    = new Set(); // "dim:cx,cz" columns that have had vertical scan
+        this.dimension   = DIM_EARTH;
+        this.chunks      = new Map(); // "cx,cy,cz" -> Uint8Array (types)
+        this.lights      = new Map(); // "cx,cy,cz" -> Uint8Array (sky light 0-15)
+        this.colorLights = new Map(); // "cx,cy,cz" -> Uint8Array(CHUNK^3 * 3) RGB colored light
+        this.litCols     = new Set(); // "dim:cx,cz" columns that have had vertical scan
     }
 
     // ── Chunk data ────────────────────────────────────────────────────────────
@@ -296,6 +305,23 @@ export class VoxelWorld {
             }
             this.chunks.set(key, data);
             this.lights.set(key, new Uint8Array(CHUNK * CHUNK * CHUNK));
+
+            // ── Voidwood Tree Spawning (smooth biome only) ────────────────────
+            const FATES_SPAWN_X = 150, FATES_SPAWN_Z = 450;
+            for (let lz = 0; lz < CHUNK; lz++)
+            for (let lx = 0; lx < CHUNK; lx++) {
+                const wx = x0 + lx, wz = z0 + lz;
+                if (fatesBiome(wx, wz) !== 1) continue;
+                const surf = smoothSurf(wx, wz);
+                if (surf < y0 || surf >= y0 + CHUNK) continue;
+                if (this.get(wx, surf, wz) !== VOIDGRASS) continue;
+                // Protect the hardcoded player spawn area
+                const dsx = wx - FATES_SPAWN_X, dsz = wz - FATES_SPAWN_Z;
+                if (dsx * dsx + dsz * dsz < 30 * 30) continue;
+                if (hash(wx, 0, wz) < 0.015) {
+                    this._spawnVoidTree(wx, surf + 1, wz);
+                }
+            }
             return;
         }
 
@@ -350,7 +376,15 @@ export class VoxelWorld {
                     if (!isCave(wx, wy, wz, surf)) {
                         if (wy < 100) {
                             // Zone 2: Deep Stone Layer (-100 to 99)
-                            t = DEEPSTONE;
+                            // Ore concentration increases with depth: depth_t goes 0 at y=100 to 1 at y=-100
+                            const depth_t = (100 - wy) / 200;
+                            const ironThresh = 0.80 - 0.20 * depth_t;
+                            const leadThresh = 0.86 - 0.18 * depth_t;
+                            const oN = oreNoise(wx + 500, wy, wz + 500);
+                            const oNL = oreNoise(wx + 1000, wy + 200, wz + 1000);
+                            if (oNL > leadThresh) t = LEAD_ORE;
+                            else if (oN > ironThresh) t = IRON_ORE;
+                            else t = DEEPSTONE;
                         } else {
                             // Zone 3: Overworld (100+)
                             let topMat = GRASS, midMat = DIRT, botMat = STONE;
@@ -366,7 +400,16 @@ export class VoxelWorld {
                             else if (wy >= dirtBase)  t = midMat;
                             else {
                                 const thr = dirtBase > 0 ? 0.72*(wy/dirtBase) : 0;
-                                t = stoneNoise(wx, wy, wz) > thr ? botMat : midMat;
+                                const baseBlock = stoneNoise(wx, wy, wz) > thr ? botMat : midMat;
+                                // Iron ore veins in overworld stone, sparser near surface
+                                if (baseBlock === STONE) {
+                                    const depth_t = (100 - wy) / 200; // negative near surface
+                                    const ironThresh = 0.80 - 0.20 * Math.max(0, depth_t);
+                                    const oN = oreNoise(wx + 500, wy, wz + 500);
+                                    t = oN > ironThresh ? IRON_ORE : STONE;
+                                } else {
+                                    t = baseBlock;
+                                }
                             }
                         }
                     }
@@ -402,6 +445,66 @@ export class VoxelWorld {
                 }
             }
         }
+        // ── Ore Colored Light Seeding ─────────────────────────────────────────
+        const oreQ = [];
+        for (let lz = 0; lz < CHUNK; lz++)
+        for (let ly = 0; ly < CHUNK; ly++)
+        for (let lx = 0; lx < CHUNK; lx++) {
+            const t = data[lx + CHUNK*(ly + CHUNK*lz)];
+            let sr = 0, sg = 0, sb = 0;
+            if (t === IRON_ORE) { sr = 24; sg = 12; sb = 0; }
+            else if (t === LEAD_ORE) { sr = 0; sg = 10; sb = 24; }
+            else continue;
+            this._setColoredLight(x0+lx, y0+ly, z0+lz, sr, sg, sb);
+            oreQ.push(x0+lx, y0+ly, z0+lz);
+        }
+        if (oreQ.length > 0) this._propagateColoredLight(oreQ);
+    }
+
+    _setColoredLight(x, y, z, r, g, b) {
+        if (y < MIN_Y || y >= MAX_Y) return;
+        const key = this._key(x, y, z);
+        let cl = this.colorLights.get(key);
+        if (!cl) { cl = new Uint8Array(CHUNK * CHUNK * CHUNK * 3); this.colorLights.set(key, cl); }
+        const i = (this._local(x) + CHUNK * (this._local(y) + CHUNK * this._local(z))) * 3;
+        cl[i] = r; cl[i+1] = g; cl[i+2] = b;
+    }
+
+    _peekColoredLight(x, y, z) {
+        if (y < MIN_Y || y >= MAX_Y) return [0, 0, 0];
+        const key = this._key(x, y, z);
+        const cl = this.colorLights.get(key);
+        if (!cl) return [0, 0, 0];
+        const i = (this._local(x) + CHUNK * (this._local(y) + CHUNK * this._local(z))) * 3;
+        return [cl[i], cl[i+1], cl[i+2]];
+    }
+
+    getColoredLight(x, y, z) {
+        return this._peekColoredLight(x, y, z);
+    }
+
+    _propagateColoredLight(q) {
+        let head = 0;
+        while (head < q.length) {
+            const x = q[head++], y = q[head++], z = q[head++];
+            const [lr, lg, lb] = this._peekColoredLight(x, y, z);
+            if (lr <= 1 && lg <= 1 && lb <= 1) continue;
+            for (let d = 0; d < 18; d += 3) {
+                const nx = x+LDIRS[d], ny = y+LDIRS[d+1], nz = z+LDIRS[d+2];
+                if (ny < MIN_Y || ny >= MAX_Y) continue;
+                const nk = this._key(nx, ny, nz);
+                const nc = this.chunks.get(nk);
+                if (!nc) continue;
+                const ni = this._local(nx) + CHUNK*(this._local(ny) + CHUNK*this._local(nz));
+                const nt = nc[ni];
+                if (nt !== AIR && nt !== WATER && nt !== MOLTENROCK && nt !== LEAVES && nt !== PINELEAVES && nt !== VOIDLEAVES) continue;
+                const nr = lr > 1 ? lr-1 : 0, ng = lg > 1 ? lg-1 : 0, nb = lb > 1 ? lb-1 : 0;
+                const [er, eg, eb] = this._peekColoredLight(nx, ny, nz);
+                if (nr <= er && ng <= eg && nb <= eb) continue;
+                this._setColoredLight(nx, ny, nz, Math.max(nr,er), Math.max(ng,eg), Math.max(nb,eb));
+                q.push(nx, ny, nz);
+            }
+        }
     }
 
     _spawnTree(wx, wy, wz, logType, leafType) {
@@ -427,6 +530,34 @@ export class VoxelWorld {
                 if (this.get(wx + lx, th + ly, wz + lz) === AIR) {
                     this.set(wx + lx, th + ly, wz + lz, leafType);
                 }
+            }
+        }
+    }
+
+    _spawnVoidTree(wx, wy, wz) {
+        const h = 18 + Math.floor(hash(wx, wy, wz) * 10); // 18–27 blocks tall
+        const R = 9  + Math.floor(hash(wx, wy + 1, wz) * 4); // canopy radius 9–12
+        // Wide 5×5 base trunk (bottom 3 layers)
+        for (let dy = 0; dy < 3; dy++)
+        for (let dx = -2; dx <= 2; dx++)
+        for (let dz = -2; dz <= 2; dz++)
+            this.set(wx + dx, wy + dy, wz + dz, VOIDWOOD);
+        // 3×3 mid trunk
+        for (let dy = 3; dy < h - 2; dy++)
+        for (let dx = -1; dx <= 1; dx++)
+        for (let dz = -1; dz <= 1; dz++)
+            this.set(wx + dx, wy + dy, wz + dz, VOIDWOOD);
+        // Single-wide tip
+        for (let dy = h - 2; dy < h; dy++)
+            this.set(wx, wy + dy, wz, VOIDWOOD);
+        // Spherical leaf canopy centred at the top
+        const th = wy + h;
+        for (let ly = -R; ly <= R; ly++)
+        for (let lx = -R; lx <= R; lx++)
+        for (let lz = -R; lz <= R; lz++) {
+            if (lx * lx + ly * ly + lz * lz <= R * R) {
+                if (this.get(wx + lx, th + ly, wz + lz) === AIR)
+                    this.set(wx + lx, th + ly, wz + lz, VOIDLEAVES);
             }
         }
     }
@@ -596,6 +727,7 @@ export class VoxelWorld {
     reset() {
         this.chunks.clear();
         this.lights.clear();
+        this.colorLights.clear();
         this.litCols.clear();
     }
 
